@@ -26,8 +26,22 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+gemini_client = None
+if GEMINI_API_KEY:
+    try:
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        logger.info("Gemini client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini client: {e}")
+
+def get_gemini_client():
+    global gemini_client
+    if gemini_client is None:
+        key = os.environ.get('GEMINI_API_KEY', '')
+        if key:
+            gemini_client = genai.Client(api_key=key)
+    return gemini_client
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'fluentra-secret-key-change-in-production')
 JWT_ALGORITHM = "HS256"
