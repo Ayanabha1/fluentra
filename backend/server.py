@@ -32,10 +32,12 @@ logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 gemini_client = None
+gemini_live_client = None
 if GEMINI_API_KEY:
     try:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("Gemini client initialized successfully")
+        gemini_live_client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1alpha"})
+        logger.info("Gemini clients initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize Gemini client: {e}")
 
@@ -46,6 +48,17 @@ def get_gemini_client():
         if key:
             gemini_client = genai.Client(api_key=key)
     return gemini_client
+
+def get_gemini_live_client():
+    global gemini_live_client
+    if gemini_live_client is None:
+        key = os.environ.get('GEMINI_API_KEY', '')
+        if key:
+            gemini_live_client = genai.Client(api_key=key, http_options={"api_version": "v1alpha"})
+    return gemini_live_client
+
+LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+TEXT_MODEL = "gemini-2.5-flash"
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'fluentra-secret-key-change-in-production')
 JWT_ALGORITHM = "HS256"
