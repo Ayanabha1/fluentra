@@ -63,9 +63,9 @@ export default function OnboardingPage() {
     {
       title: 'Your Target Level', icon: Target,
       content: (
-        <div className="space-y-3">
+        <div className="space-y-2 max-h-[300px] overflow-y-auto">
           {cefrLevels.map(l => (
-            <Button key={l.value} variant={targetLevel === l.value ? 'default' : 'outline'} className={`w-full rounded-xl py-6 justify-start text-left ${targetLevel === l.value ? 'bg-primary text-primary-foreground' : ''}`}
+            <Button key={l.value} variant={targetLevel === l.value ? 'default' : 'outline'} className={`w-full rounded-xl py-5 justify-start text-left ${targetLevel === l.value ? 'bg-primary text-primary-foreground' : ''}`}
               onClick={() => setTargetLevel(l.value)} data-testid={`target-${l.value}`}>{l.label}</Button>
           ))}
         </div>
