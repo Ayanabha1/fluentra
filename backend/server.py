@@ -279,11 +279,7 @@ Respond ONLY with valid JSON:
     try:
         client = get_gemini_client()
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        scores = json.loads(response.text)
+            model=TEXT_MODEL,
     except Exception as e:
         logger.error(f"Assessment scoring error: {e}")
         scores = {"fluency_score": 5, "grammar_score": 5, "vocabulary_score": 5, "confidence_score": 5, "weighted_score": 50, "cefr_level": "B1", "strengths": ["Good communication willingness", "Engaged in conversation"], "areas_to_improve": ["Grammar accuracy", "Vocabulary range"], "detailed_feedback": "Assessment completed. Let's work together to improve your English!"}
