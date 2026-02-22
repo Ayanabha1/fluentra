@@ -300,7 +300,7 @@ Respond ONLY with valid JSON:
 {{"estimated_weeks":8,"modules":[{{"title":"Week 1: Title","week_number":1,"focus_areas":["grammar","vocabulary"],"difficulty":"easy","session_templates":[{{"type":"vocabulary","title":"Title","description":"Desc","duration_minutes":20,"focus":"focus"}}]}}]}}"""
 
     try:
-        response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+        response = get_gemini_client().models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
         plan_data = json.loads(response.text)
     except Exception as e:
         logger.error(f"Plan generation error: {e}")
