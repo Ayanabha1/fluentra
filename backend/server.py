@@ -263,7 +263,8 @@ Respond ONLY with valid JSON:
 {{"fluency_score":0,"grammar_score":0,"vocabulary_score":0,"confidence_score":0,"weighted_score":0,"cefr_level":"B1","strengths":["str1","str2"],"areas_to_improve":["area1","area2"],"detailed_feedback":"feedback text"}}"""
 
     try:
-        response = gemini_client.models.generate_content(
+        client = get_gemini_client()
+        response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
