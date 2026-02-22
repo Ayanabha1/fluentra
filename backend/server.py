@@ -433,7 +433,7 @@ async def websocket_session(websocket: WebSocket):
             input_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
-        async with gemini_client.aio.live.connect(
+        async with get_gemini_client().aio.live.connect(
             model="gemini-live-2.5-flash-native-audio",
             config=config
         ) as gemini_session:
