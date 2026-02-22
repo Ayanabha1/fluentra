@@ -514,7 +514,7 @@ async def score_session_ai(session_id: str, user=Depends(get_current_user)):
     transcript = s.get("transcript", [])
     transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
     try:
-        response = gemini_client.models.generate_content(
+        response = get_gemini_client().models.generate_content(
             model="gemini-2.5-flash",
             contents=f"""Analyze this English tutoring session ({s.get('session_type')}) and score it.
 Transcript:
