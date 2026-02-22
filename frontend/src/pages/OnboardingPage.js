@@ -52,9 +52,9 @@ export default function OnboardingPage() {
     {
       title: 'Your Native Language', icon: Globe,
       content: (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-[300px] overflow-y-auto">
           {languages.map(l => (
-            <Button key={l} variant={nativeLang === l ? 'default' : 'outline'} className={`rounded-xl py-6 ${nativeLang === l ? 'bg-primary text-primary-foreground' : ''}`}
+            <Button key={l} variant={nativeLang === l ? 'default' : 'outline'} className={`rounded-xl py-4 text-sm ${nativeLang === l ? 'bg-primary text-primary-foreground' : ''}`}
               onClick={() => setNativeLang(l)} data-testid={`lang-${l.toLowerCase()}`}>{l}</Button>
           ))}
         </div>
