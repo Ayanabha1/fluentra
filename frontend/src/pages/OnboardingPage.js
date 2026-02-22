@@ -85,9 +85,9 @@ export default function OnboardingPage() {
     {
       title: 'Sessions Per Week', icon: Calendar,
       content: (
-        <div className="flex items-center justify-center gap-6">
+        <div className="flex flex-wrap items-center justify-center gap-4">
           {[1, 2, 3, 5, 7].map(n => (
-            <Button key={n} variant={sessionsPerWeek === n ? 'default' : 'outline'} className={`w-16 h-16 rounded-xl text-xl font-bold ${sessionsPerWeek === n ? 'bg-primary text-primary-foreground' : ''}`}
+            <Button key={n} variant={sessionsPerWeek === n ? 'default' : 'outline'} className={`w-14 h-14 rounded-xl text-lg font-bold ${sessionsPerWeek === n ? 'bg-primary text-primary-foreground' : ''}`}
               onClick={() => setSessionsPerWeek(n)} data-testid={`sessions-${n}`}>{n}</Button>
           ))}
         </div>
