@@ -1,0 +1,197 @@
+{
+  "project_name": "Fluentra.ai",
+  "theme": {
+    "name": "Organic Intelligence",
+    "description": "A sophisticated blend of Swiss clarity and Organic warmth. It feels like a high-end botanical study room for the future.",
+    "mode": "system-toggle",
+    "fonts": {
+      "heading": {
+        "family": "Fraunces",
+        "fallback": "serif",
+        "weights": ["300", "400", "600"],
+        "usage": "Use for all H1-H3 headings to add human character to the AI experience. Tracking-tight."
+      },
+      "body": {
+        "family": "Manrope",
+        "fallback": "sans-serif",
+        "weights": ["400", "500", "700"],
+        "usage": "Use for UI text, labels, and long-form content. High legibility."
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "fallback": "monospace",
+        "usage": "Use for data values, timers, and phonetic transcriptions."
+      }
+    },
+    "colors": {
+      "light": {
+        "background": "#FDFCF8",
+        "foreground": "#1A1D1C",
+        "card": "#FFFFFF",
+        "card_foreground": "#1A1D1C",
+        "popover": "#FFFFFF",
+        "popover_foreground": "#1A1D1C",
+        "primary": "#1E3A2F",
+        "primary_foreground": "#FFFFFF",
+        "secondary": "#E8E4D9",
+        "secondary_foreground": "#1E3A2F",
+        "muted": "#F2F0E9",
+        "muted_foreground": "#6B706D",
+        "accent": "#E07A5F",
+        "accent_foreground": "#FFFFFF",
+        "destructive": "#D94F3D",
+        "destructive_foreground": "#FFFFFF",
+        "border": "#E6E2D6",
+        "input": "#E6E2D6",
+        "ring": "#1E3A2F"
+      },
+      "dark": {
+        "background": "#0B1210",
+        "foreground": "#F2F0E9",
+        "card": "#141C19",
+        "card_foreground": "#F2F0E9",
+        "popover": "#141C19",
+        "popover_foreground": "#F2F0E9",
+        "primary": "#4A7C69",
+        "primary_foreground": "#FFFFFF",
+        "secondary": "#1E2623",
+        "secondary_foreground": "#F2F0E9",
+        "muted": "#1E2623",
+        "muted_foreground": "#9CA3A1",
+        "accent": "#E07A5F",
+        "accent_foreground": "#FFFFFF",
+        "destructive": "#FF6B6B",
+        "destructive_foreground": "#FFFFFF",
+        "border": "#2C3632",
+        "input": "#2C3632",
+        "ring": "#4A7C69"
+      }
+    },
+    "radius": "0.75rem",
+    "shadows": {
+      "soft": "0 4px 20px -2px rgba(30, 58, 47, 0.08)",
+      "hard": "4px 4px 0px 0px rgba(30, 58, 47, 1)"
+    }
+  },
+  "layout_strategies": {
+    "dashboard_grid": {
+      "type": "bento",
+      "classes": "grid grid-cols-1 md:grid-cols-4 lg:grid-cols-6 gap-4 p-4 md:p-6",
+      "rules": "Primary metric = col-span-2. Feed = col-span-2 row-span-2. Use aspect-ratio to maintain shape."
+    },
+    "marketing_hero": {
+      "type": "asymmetric",
+      "classes": "flex flex-col md:flex-row items-center gap-12 py-20 px-6 max-w-7xl mx-auto",
+      "rules": "Text left (40%), Visual right (60%). Visual must break the grid or float."
+    },
+    "voice_interface": {
+      "type": "immersive_center",
+      "classes": "flex flex-col items-center justify-center h-[80vh] w-full relative overflow-hidden",
+      "rules": "Centralize the visualizer. Transcript floats below. Controls fixed at bottom."
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 rounded-full px-8 py-6 text-lg font-medium transition-transform hover:scale-105 active:scale-95 shadow-soft",
+      "secondary": "bg-secondary text-secondary-foreground hover:bg-secondary/80 rounded-full px-6 py-4 font-medium",
+      "ghost": "hover:bg-accent/10 hover:text-accent rounded-lg px-4 py-2 transition-colors",
+      "outline": "border-2 border-primary text-primary hover:bg-primary hover:text-primary-foreground rounded-full px-6 py-3 font-medium"
+    },
+    "cards": {
+      "base": "bg-card text-card-foreground border border-border/50 rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow duration-300",
+      "interactive": "cursor-pointer hover:border-accent/50 group relative overflow-hidden"
+    },
+    "inputs": {
+      "base": "bg-input/20 border-transparent focus:border-primary focus:ring-2 focus:ring-primary/20 rounded-lg px-4 py-3 text-base transition-all placeholder:text-muted-foreground/50",
+      "active": "bg-background border-primary ring-2 ring-primary/10"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "bg-background/80 backdrop-blur-xl border-b border-white/10",
+    "gradients": {
+      "brand_overlay": "bg-gradient-to-br from-primary/20 via-transparent to-accent/10",
+      "voice_active": "bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-accent/20 via-transparent to-transparent"
+    },
+    "textures": {
+      "noise": "url(\"data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E\")"
+    }
+  },
+  "motion_guidelines": {
+    "page_transition": {
+      "initial": { "opacity": 0, "y": 20 },
+      "animate": { "opacity": 1, "y": 0 },
+      "exit": { "opacity": 0, "y": -20 },
+      "transition": { "duration": 0.4, "ease": [0.22, 1, 0.36, 1] }
+    },
+    "micro_interactions": {
+      "hover_lift": "hover:-translate-y-1 transition-transform duration-300",
+      "button_press": "active:scale-95 transition-transform duration-100"
+    },
+    "voice_state": {
+      "listening": "Pulse animation on central orb. Scale 1.1 -> 1.0 infinite.",
+      "processing": "Spin/Rotate animation. Rapid color shift.",
+      "speaking": "Waveform amplitude modulation based on volume."
+    }
+  },
+  "image_assets": {
+    "hero_main": {
+      "url": "https://images.unsplash.com/photo-1653669487404-09c3617c2b6c",
+      "alt": "Diverse group of students discussing around a table",
+      "usage": "Landing page hero section, right side or background with overlay"
+    },
+    "tutoring_context": {
+      "url": "https://images.unsplash.com/photo-1671726203397-00b737d610f3",
+      "alt": "Two women in an intimate tutoring setting",
+      "usage": "Features section, illustrating 'Personalized Attention'"
+    },
+    "brand_texture_green": {
+      "url": "https://images.unsplash.com/photo-1762014270371-17b16dc4a1fa",
+      "alt": "Abstract green organic shapes",
+      "usage": "Backgrounds for cards, auth screens, or subtle overlays"
+    },
+    "brand_texture_dark": {
+      "url": "https://images.pexels.com/photos/29708309/pexels-photo-29708309.jpeg",
+      "alt": "Dark fluid waves",
+      "usage": "Dark mode backgrounds or 'Listening Mode' active state"
+    },
+    "workspace_setup": {
+      "url": "https://images.unsplash.com/photo-1757447247468-fe0962f638fa",
+      "alt": "Modern laptop workspace",
+      "usage": "Blog/Resources section or Dashboard empty state"
+    },
+    "persona_tutor": {
+      "url": "https://images.pexels.com/photos/33871730/pexels-photo-33871730.jpeg",
+      "alt": "Professional tutor profile",
+      "usage": "Testimonial or 'Your Tutor' placeholder"
+    }
+  },
+  "accessibility_rules": {
+    "contrast": "Ensure text is APCA compliant. Use 'font-medium' on dark backgrounds.",
+    "voice_cues": "MUST provide visual feedback for all voice states (Listening, Processing, Speaking) for deaf/hard-of-hearing users.",
+    "reduced_motion": "Respect 'prefers-reduced-motion'. Disable parallax and heavy transitions."
+  },
+  "iconography": {
+    "library": "lucide-react",
+    "style": "Stroke width 1.5px or 2px. Rounded joins.",
+    "usage": "Use icons as visual anchors, not just decoration. Pair with text where possible."
+  },
+  "instructions_to_main_agent": [
+    "Install 'lucide-react', 'framer-motion', 'clsx', 'tailwind-merge', 'recharts' immediately.",
+    "Set up the Tailwind config with the custom colors defined in 'theme.colors' above.",
+    "Create a 'Layout' component that handles the Navbar (with Dark/Light toggle) and Footer.",
+    "Implement the 'VoiceVisualizer' component early - it's the core USP. Use the 'brand_texture' images as masks or backgrounds for it.",
+    "For the Dashboard, use the 'bento' grid strategy. Don't make generic rows.",
+    "Use 'Fraunces' font for all Headings. Import it from Google Fonts.",
+    "Ensure all buttons have the 'rounded-full' style to distinguish from the rectangular cards.",
+    "All interactive elements MUST have 'data-testid' attributes."
+  ],
+  "universal_guidelines": [
+    "Avoid 'AI slop' - no generic gradients or centered text without purpose.",
+    "Dark colors look good when used independently without gradients.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "Do not apply universal transition 'transition: all'.",
+    "Never use emoji icons.",
+    "Use 2-3x more spacing than feels comfortable."
+  ]
+}
