@@ -235,14 +235,13 @@ async def analyze_session(session_id: str, user_id: str, transcript: list):
         transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript if t.get('text')])
         if not transcript_text.strip():
             return
-        prompt = f"""You are a friendly, encouraging English coach analyzing a practice session.
-You genuinely want the student to succeed. Provide a supportive analysis.
+        prompt = f"""You are an expert English tutor analyzing a session.
 Transcript:
 {transcript_text}
 
 Extract structured data. Respond ONLY with valid JSON:
 {{
-  "summary": "2-3 sentence recap of the conversation with warm, encouraging remarks",
+  "summary": "2-3 sentence recap of conversation topics and any homework given",
   "mistakes": ["mistake 1 -> correction", "mistake 2 -> correction"],
   "new_words": ["word1", "word2"],
   "other_details": "Any other notable progress or details"
@@ -281,15 +280,7 @@ async def complete_session(session_id: str, input: SessionComplete, background_t
         "metrics": input.metrics if input.metrics else s.get("metrics", {}),
         "transcript": transcript,
     }
-    # Atomic update to prevent race conditions causing duplicate session stats
-    update_result = await db.sessions.update_one(
-        {"id": session_id, "user_id": user["id"], "status": "active"}, 
-        {"$set": update_data}
-    )
-    if update_result.modified_count == 0:
-        logger.info(f"Session {session_id} already processed (or not active), skipping duplicate stat increments.")
-        return await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
-
+    await db.sessions.update_one({"id": session_id}, {"$set": update_data})
     await db.users.update_one({"id": user["id"]}, {"$inc": {"total_sessions": 1}})
     last_session = await db.sessions.find_one(
         {"user_id": user["id"], "status": "completed", "id": {"$ne": session_id}},
@@ -480,13 +471,71 @@ async def add_memory(input: MemoryCreateInput, user=Depends(get_current_user)):
     await db.memories.insert_one({**mem})
     return mem
 
-# ==================== Gemini Live WebSocket ====================
+# ==================== Gemini Live Token (ephemeral, direct client connection) ====================
+
+class LiveTokenRequest(BaseModel):
+    session_id: str
+    system_prompt: str
+
+@api_router.post("/sessions/live-token")
+async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)):
+    """
+    Mints a short-lived ephemeral token with the system prompt baked in server-side.
+    The frontend uses this token to connect DIRECTLY to Gemini — no audio relay,
+    zero latency overhead from the Python proxy.
+    """
+    s_doc = await db.sessions.find_one({"id": input.session_id, "user_id": user["id"]})
+    if not s_doc:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Optionally append previous session summary for continuity
+    system_prompt = input.system_prompt
+    try:
+        last_session = await db.sessions.find_one(
+            {"user_id": user["id"], "status": "completed", "analysis.summary": {"$exists": True},
+             "id": {"$ne": input.session_id}},
+            {"_id": 0}, sort=[("started_at", -1)]
+        )
+        if last_session and last_session.get("analysis", {}).get("summary"):
+            system_prompt += f"\n\nPrevious session recap:\n{last_session['analysis']['summary']}"
+    except Exception as e:
+        logger.warning(f"Could not fetch previous session summary: {e}")
+
+    try:
+        now = datetime.now(timezone.utc)
+        token = get_gemini_live_client().auth_tokens.create(
+            config={
+                "uses": 1,
+                "expire_time": (now + timedelta(minutes=30)).isoformat(),
+                "new_session_expire_time": (now + timedelta(minutes=2)).isoformat(),
+                "live_connect_constraints": {
+                    "model": LIVE_MODEL,
+                    "config": {
+                        "response_modalities": ["AUDIO"],
+                        "system_instruction": system_prompt,
+                        "input_audio_transcription": {},
+                        "output_audio_transcription": {},
+                        "thinking_config": {"thinking_budget": 0},
+                    }
+                },
+                "http_options": {"api_version": "v1alpha"},
+            }
+        )
+        logger.info(f"Minted ephemeral token for session {input.session_id}")
+        return {"token": token.name, "model": LIVE_MODEL}
+    except Exception as e:
+        logger.error(f"Failed to mint ephemeral token: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not create live token: {str(e)}")
+
+
+# ==================== Gemini Live WebSocket (DEPRECATED — kept as fallback) ====================
 @app.websocket("/api/ws/session")
 async def websocket_session(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection established")
     user_id = None
     try:
+        # First message is always JSON init
         init_data = await websocket.receive_json()
         system_prompt = init_data.get("system_prompt", "You are Fluentra, a friendly English tutor.")
         session_id = init_data.get("session_id", "")
@@ -504,7 +553,7 @@ async def websocket_session(websocket: WebSocket):
                 )
                 if last_session and last_session.get("analysis") and last_session["analysis"].get("summary"):
                     summary = last_session["analysis"]["summary"]
-                    system_prompt += f"\n\nHere is a short recap of the user's previous session to help you continue where they left off:\n{summary}"
+                    system_prompt += f"\n\nPrevious session recap:\n{summary}"
             except Exception as e:
                 logger.error(f"Failed to fetch previous session summary: {e}")
 
@@ -514,8 +563,6 @@ async def websocket_session(websocket: WebSocket):
             system_instruction=types.Content(parts=[types.Part(text=system_prompt)]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            # Disable chain-of-thought — the native audio preview model externalises
-            # its reasoning as speech unless thinking is explicitly turned off.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
 
@@ -523,30 +570,31 @@ async def websocket_session(websocket: WebSocket):
             model=LIVE_MODEL,
             config=config
         ) as gemini_session:
-            await websocket.send_json({"type": "connected", "message": "Session started"})
-            logger.info("Gemini Live session connected successfully")
+            await websocket.send_json({"type": "connected"})
+            logger.info("Gemini Live session connected")
 
-            # FIX: Shared flag to signal both tasks to stop cleanly
             done_event = asyncio.Event()
 
             async def receive_from_client():
                 try:
                     while not done_event.is_set():
-                        raw = await websocket.receive_text()
-                        msg = json.loads(raw)
-                        if msg.get("type") == "audio":
-                            audio_bytes = base64.b64decode(msg["data"])
+                        # FIX: receive raw bytes OR text — audio takes the fast binary path
+                        message = await websocket.receive()
+                        if message.get("bytes") is not None:
+                            # RAW BINARY PATH: Int16 PCM bytes sent directly, zero JSON/base64 overhead
                             await gemini_session.send_realtime_input(
-                                audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+                                audio=types.Blob(data=message["bytes"], mime_type="audio/pcm;rate=16000")
                             )
-                        elif msg.get("type") == "text":
-                            await gemini_session.send_client_content(
-                                turns=types.Content(parts=[types.Part(text=msg["data"])]),
-                                turn_complete=True
-                            )
-                        elif msg.get("type") == "end":
-                            done_event.set()
-                            return
+                        elif message.get("text") is not None:
+                            msg = json.loads(message["text"])
+                            if msg.get("type") == "text":
+                                await gemini_session.send_client_content(
+                                    turns=types.Content(parts=[types.Part(text=msg["data"])]),
+                                    turn_complete=True
+                                )
+                            elif msg.get("type") == "end":
+                                done_event.set()
+                                return
                 except WebSocketDisconnect:
                     logger.info("Client disconnected")
                     done_event.set()
@@ -559,7 +607,6 @@ async def websocket_session(websocket: WebSocket):
                     while not done_event.is_set():
                         turn = gemini_session.receive()
                         async for response in turn:
-                            # FIX: Stop processing immediately if client disconnected
                             if done_event.is_set():
                                 return
                             try:
@@ -570,12 +617,9 @@ async def websocket_session(websocket: WebSocket):
                                 if sc.model_turn and sc.model_turn.parts:
                                     for part in sc.model_turn.parts:
                                         if part.inline_data and part.inline_data.data:
-                                            audio_b64 = base64.b64encode(part.inline_data.data).decode()
-                                            await websocket.send_json({
-                                                "type": "audio",
-                                                "data": audio_b64,
-                                                "mime_type": getattr(part.inline_data, 'mime_type', 'audio/pcm')
-                                            })
+                                            # FIX: Send audio as RAW BINARY frame — eliminates base64
+                                            # encode on backend AND decode on frontend
+                                            await websocket.send_bytes(part.inline_data.data)
                                         if part.text:
                                             await websocket.send_json({
                                                 "type": "transcript",
@@ -600,7 +644,6 @@ async def websocket_session(websocket: WebSocket):
                                     await websocket.send_json({"type": "turn_complete"})
                                     break
 
-                            # FIX: Only log actual unexpected errors, not the expected 1005 disconnect noise
                             except WebSocketDisconnect:
                                 done_event.set()
                                 return
@@ -644,62 +687,36 @@ async def score_session_ai(session_id: str, user=Depends(get_current_user)):
         logger.info(f"Session {session_id} already scored, returning cached result")
         return {"metrics": s.get("metrics", {}), "analysis": s.get("analysis", {})}
 
-    # Basic lock to prevent duplicate scoring concurrency
-    lock_res = await db.sessions.update_one(
-        {"id": session_id, "user_id": user["id"], "scoring_in_progress": {"$ne": True}},
-        {"$set": {"scoring_in_progress": True}}
-    )
-    if lock_res.modified_count == 0:
-        logger.warning(f"Session {session_id} is already being scored. Returning 409.")
-        raise HTTPException(status_code=409, detail="Scoring in progress. Please try again in a few seconds.")
-
     transcript = s.get("transcript", [])
     transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
     try:
-        try:
-            response = get_gemini_client().models.generate_content(
-                model=TEXT_MODEL,
-                contents=f"""You are Fluentra, a friendly, encouraging English coach scoring a practice session.
-You are deeply supportive and want the student to feel proud of their progress!
-Analyze this session ({s.get('session_type')}) and carefully score it.
+        response = get_gemini_client().models.generate_content(
+            model=TEXT_MODEL,
+            contents=f"""Analyze this English tutoring session ({s.get('session_type')}) and score it.
 Transcript:
 {transcript_text if transcript_text.strip() else "Short session - provide moderate scores."}
 
 Respond ONLY with valid JSON:
 {{
-  "metrics": {{
-    "grammar_accuracy": 70,
-    "fluency_wpm": 100,
-    "filler_word_count": 3,
-    "vocabulary_retention_rate": 70,
-    "overall_score": 70,
-    "feedback": ["Great job speaking English today! I loved how you...", "One tiny thing: try to..."]
-  }},
-  "analysis": {{
-    "summary": "A detailed 2-3 sentence summary of the conversation with enthusiastic, supportive remarks.",
-    "other_details": "Any other notable details, like great confidence or improvements.",
-    "new_words": ["word1", "word2"],
-    "mistakes": [
-      {{"error_type": "grammar", "severity": "minor", "original": "wrong sentence", "corrected": "correct sentence", "explanation": "why..."}}
-    ]
-  }}
+  "grammar_accuracy": 70,
+  "fluency_wpm": 100,
+  "filler_word_count": 3,
+  "vocabulary_retention_rate": 70,
+  "overall_score": 70,
+  "feedback": ["Detailed feedback point 1", "Detailed feedback point 2"],
+  "mistakes": [{{"error_type": "grammar", "severity": "minor", "original": "said", "corrected": "correct", "explanation": "why"}}]
 }}""",
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            data = json.loads(response.text)
-            metrics = data.get("metrics", {})
-            analysis = data.get("analysis", {})
-        except Exception as e:
-            logger.error(f"Session scoring error: {e}")
-            metrics = {"grammar_accuracy": 70, "fluency_wpm": 100, "filler_word_count": 3, "vocabulary_retention_rate": 70, "overall_score": 70, "feedback": ["Google API limits couldn't process the full detailed feedback right now.", "However, your session practice was still saved successfully! Keep up the great work!"]}
-            analysis = {"summary": "Our AI backend is currently overloaded (Google API Limit), but don't let that stop you. You put in the practice time today and that's exactly how you get fluent!", "other_details": "Points for showing up!", "new_words": [], "mistakes": []}
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        scores = json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Session scoring error: {e}")
+        scores = {"grammar_accuracy": 70, "fluency_wpm": 100, "filler_word_count": 3, "vocabulary_retention_rate": 70, "overall_score": 70, "feedback": ["Good effort! Session saved successfully."], "mistakes": []}
 
-        await db.sessions.update_one({"id": session_id}, {"$set": {"metrics": metrics, "analysis": analysis, "feedback": metrics.get("feedback", [])}})
-        for m in analysis.get("mistakes", []):
-            await db.mistakes.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "error_type": m.get("error_type", "other"), "severity": m.get("severity", "minor"), "original": m.get("original", ""), "corrected": m.get("corrected", ""), "explanation": m.get("explanation", ""), "context": "", "acknowledged": False, "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()})
-        return {"metrics": metrics, "analysis": analysis}
-    finally:
-        await db.sessions.update_one({"id": session_id}, {"$unset": {"scoring_in_progress": ""}})
+    await db.sessions.update_one({"id": session_id}, {"$set": {"metrics": scores, "feedback": scores.get("feedback", [])}})
+    for m in scores.get("mistakes", []):
+        await db.mistakes.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "error_type": m.get("error_type", "other"), "severity": m.get("severity", "minor"), "original": m.get("original", ""), "corrected": m.get("corrected", ""), "explanation": m.get("explanation", ""), "context": "", "acknowledged": False, "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()})
+    return scores
 
 app.include_router(api_router)
 

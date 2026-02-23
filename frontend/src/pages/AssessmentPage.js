@@ -185,12 +185,11 @@ export default function AssessmentPage() {
     }
   }, [transcript, status, stageIndex]);
 
-  const handleIncomingAudio = useCallback((b64Data) => {
+  const handleIncomingAudio = useCallback((rawBytes) => {
     const ctx = outputAudioContextRef.current;
     const gain = outputGainRef.current;
     if (!ctx || !gain || ctx.state === 'closed') return;
 
-    const rawBytes = decodeBase64ToBytes(b64Data);
     const audioBuffer = createAudioBuffer(ctx, rawBytes);
 
     const src = ctx.createBufferSource();
@@ -232,7 +231,14 @@ export default function AssessmentPage() {
       ws.send(JSON.stringify({ system_prompt: SYSTEM_PROMPT, session_id: sid }));
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
+      if (event.data instanceof Blob) {
+        const arrayBuffer = await event.data.arrayBuffer();
+        handleIncomingAudio(new Uint8Array(arrayBuffer));
+        setVoiceState('speaking');
+        return;
+      }
+
       const msg = JSON.parse(event.data);
       if (msg.type === 'connected') {
         setStatus('active');
@@ -240,21 +246,44 @@ export default function AssessmentPage() {
         startMicrophone();
         ws.send(JSON.stringify({ type: 'text', data: 'Hello! I am ready to start my assessment.' }));
       } else if (msg.type === 'audio') {
-        handleIncomingAudio(msg.data);
+        handleIncomingAudio(decodeBase64ToBytes(msg.data));
         setVoiceState('speaking');
       } else if (msg.type === 'transcript') {
         setTranscript(prev => {
-          const last = prev[prev.length - 1];
-          if (last && last.speaker === msg.speaker && !last.final) {
-            return [...prev.slice(0, -1), { ...last, text: last.text + ' ' + msg.data }];
+          const newPrev = [...prev];
+          let lastIndex = -1;
+          for (let i = newPrev.length - 1; i >= 0; i--) {
+            if (newPrev[i].speaker === msg.speaker) { lastIndex = i; break; }
           }
-          return [...prev, { speaker: msg.speaker, text: msg.data, final: false }];
+
+          const delta = msg.data || '';
+          if (lastIndex !== -1 && !newPrev[lastIndex].final) {
+            newPrev[lastIndex] = { ...newPrev[lastIndex], text: newPrev[lastIndex].text + delta };
+            return newPrev;
+          }
+          return [...newPrev, { speaker: msg.speaker, text: delta, final: false }];
         });
       } else if (msg.type === 'turn_complete') {
         setVoiceState('listening');
-        setTranscript(prev =>
-          prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], final: true }] : prev
-        );
+        setTranscript(prev => {
+          const newPrev = [...prev];
+          let lastAiIndex = -1;
+          for (let i = newPrev.length - 1; i >= 0; i--) {
+            if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
+          }
+          if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
+            newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
+          }
+
+          let lastUserIndex = -1;
+          for (let i = newPrev.length - 1; i >= 0; i--) {
+            if (newPrev[i].speaker === 'user') { lastUserIndex = i; break; }
+          }
+          if (lastUserIndex !== -1 && !newPrev[lastUserIndex].final) {
+            newPrev[lastUserIndex] = { ...newPrev[lastUserIndex], final: true };
+          }
+          return newPrev;
+        });
       } else if (msg.type === 'interrupted') {
         for (const source of sourcesRef.current.values()) {
           try { source.stop(); } catch (e) { }
@@ -262,6 +291,25 @@ export default function AssessmentPage() {
         }
         nextStartTimeRef.current = 0;
         setVoiceState('listening');
+        setTranscript(prev => {
+          const newPrev = [...prev];
+          let lastAiIndex = -1;
+          for (let i = newPrev.length - 1; i >= 0; i--) {
+            if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
+          }
+          if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
+            newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
+          }
+
+          let lastUserIndex = -1;
+          for (let i = newPrev.length - 1; i >= 0; i--) {
+            if (newPrev[i].speaker === 'user') { lastUserIndex = i; break; }
+          }
+          if (lastUserIndex !== -1 && !newPrev[lastUserIndex].final) {
+            newPrev[lastUserIndex] = { ...newPrev[lastUserIndex], final: true };
+          }
+          return newPrev;
+        });
       } else if (msg.type === 'error') {
         setError(msg.message);
         setStatus('intro');
@@ -314,7 +362,16 @@ export default function AssessmentPage() {
     setVoiceState('idle');
 
     try {
-      await api.put(`/sessions/${sessionId}/complete`, { transcript, metrics: {} });
+      // Clean up transcript
+      const cleanTranscript = transcript
+        .filter(t => t.text && t.text.trim().length > 0)
+        .map(t => ({ ...t, final: true }));
+
+      await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
+
+      // Artificial delay to allow user to see "Analyzing your performance..."
+      await new Promise(r => setTimeout(r, 5000));
+
       const res = await api.post(`/sessions/${sessionId}/score-assessment`);
       setScores(res.data);
       await api.post('/learning-plan/generate');

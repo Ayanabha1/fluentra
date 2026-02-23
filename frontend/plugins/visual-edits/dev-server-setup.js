@@ -354,7 +354,7 @@ function setupDevServer(config) {
         return true;
       }
 
-      // Allow all emergent.sh subdomains
+      // Allow all fluentra.ai subdomains
       if (origin.match(/^https:\/\/([a-zA-Z0-9-]+\.)*fluentra\.ai$/)) {
         return true;
       }
