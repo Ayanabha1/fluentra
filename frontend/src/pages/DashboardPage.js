@@ -20,6 +20,8 @@ export default function DashboardPage() {
   const [sessions, setSessions] = useState([]);
   const [progress, setProgress] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sessionDuration, setSessionDuration] = useState(30);
+  const [customDurationInput, setCustomDurationInput] = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -42,7 +44,7 @@ export default function DashboardPage() {
 
   const startSession = async (type = 'speaking') => {
     try {
-      const res = await api.post('/sessions', { session_type: type, plan_id: plan?.id });
+      const res = await api.post('/sessions', { session_type: type, plan_id: plan?.id, target_duration_minutes: sessionDuration });
       navigate(`/session/${res.data.id}`);
     } catch (err) {
       console.error(err);
@@ -159,6 +161,37 @@ export default function DashboardPage() {
               <p className="text-sm text-muted-foreground mb-4">
                 {currentModule ? `Focus: ${currentModule.focus_areas?.join(', ')}` : 'Start a practice session to continue improving.'}
               </p>
+
+              <div className="mb-6">
+                <label className="text-xs font-medium text-muted-foreground mb-2 block uppercase tracking-wider">Duration (Minutes)</label>
+                <div className="flex flex-wrap gap-2 items-center">
+                  {[10, 15, 30, 45, 60].map(mins => (
+                    <Button
+                      key={mins}
+                      size="sm"
+                      variant={sessionDuration === mins ? 'default' : 'outline'}
+                      onClick={() => { setSessionDuration(mins); setCustomDurationInput(''); }}
+                      className="rounded-full h-9 px-4"
+                    >
+                      {mins}m
+                    </Button>
+                  ))}
+                  <div className="flex items-center">
+                    <input
+                      type="number"
+                      placeholder="Custom"
+                      value={customDurationInput}
+                      onChange={(e) => {
+                        setCustomDurationInput(e.target.value);
+                        if (e.target.value) setSessionDuration(parseInt(e.target.value) || 30);
+                      }}
+                      className="w-20 h-9 rounded-l-full border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+                    />
+                    <div className="h-9 px-3 flex items-center bg-muted border border-l-0 border-border rounded-r-full text-xs text-muted-foreground">min</div>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => startSession('speaking')} className="rounded-full bg-accent text-accent-foreground hover:bg-accent/90" data-testid="start-speaking-session">
                   <Play size={16} className="mr-2" /> Speaking Practice
@@ -209,7 +242,12 @@ export default function DashboardPage() {
               ) : (
                 <div className="space-y-2">
                   {recentSessions.map(s => (
-                    <div key={s.id} className="flex items-center justify-between p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors" data-testid={`session-${s.id}`}>
+                    <div
+                      key={s.id}
+                      className="flex items-center justify-between p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
+                      onClick={() => navigate(`/session/${s.id}`)}
+                      data-testid={`session-${s.id}`}
+                    >
                       <div className="flex items-center gap-3">
                         <Badge variant="outline" className="capitalize text-xs">{s.session_type}</Badge>
                         <span className="text-sm">{new Date(s.completed_at || s.started_at).toLocaleDateString()}</span>

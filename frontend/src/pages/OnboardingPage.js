@@ -11,7 +11,7 @@ import { ArrowRight, ArrowLeft, Globe, Target, BookOpen, Calendar, Sun, Moon } f
 import api from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const languages = ['Spanish', 'Mandarin', 'Hindi', 'Arabic', 'Portuguese', 'French', 'German', 'Japanese', 'Korean', 'Russian', 'Turkish', 'Italian', 'Vietnamese', 'Thai', 'Other'];
+const languages = ['Spanish', 'Mandarin', 'Hindi', 'Bengali', 'Arabic', 'Portuguese', 'French', 'German', 'Japanese', 'Korean', 'Russian', 'Turkish', 'Italian', 'Vietnamese', 'Thai', 'Other'];
 const cefrLevels = [
   { value: 'A2', label: 'A2 — Elementary' },
   { value: 'B1', label: 'B1 — Intermediate' },

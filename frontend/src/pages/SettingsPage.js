@@ -17,6 +17,7 @@ export default function SettingsPage() {
   const { theme, toggleTheme } = useTheme();
   const [name, setName] = useState(user?.name || '');
   const [targetLevel, setTargetLevel] = useState(user?.target_cefr_level || 'B2');
+  const [nativeLang, setNativeLang] = useState(user?.native_language || 'Other');
   const [sessionsPerWeek, setSessionsPerWeek] = useState(user?.sessions_per_week || 3);
   const [saving, setSaving] = useState(false);
 
@@ -24,7 +25,7 @@ export default function SettingsPage() {
     setSaving(true);
     try {
       const res = await api.put('/users/onboard', {
-        native_language: user?.native_language || 'Other',
+        native_language: nativeLang,
         target_cefr_level: targetLevel,
         learning_goals: user?.learning_goals || [],
         sessions_per_week: sessionsPerWeek,
@@ -63,7 +64,12 @@ export default function SettingsPage() {
             </div>
             <div>
               <Label>Native Language</Label>
-              <div className="text-sm mt-1 text-muted-foreground">{user?.native_language || '--'}</div>
+              <Select value={nativeLang} onValueChange={setNativeLang}>
+                <SelectTrigger className="mt-1" data-testid="settings-native-lang"><SelectValue /></SelectTrigger>
+                <SelectContent className="max-h-[300px]">
+                  {['Spanish', 'Mandarin', 'Hindi', 'Bengali', 'Arabic', 'Portuguese', 'French', 'German', 'Japanese', 'Korean', 'Russian', 'Turkish', 'Italian', 'Vietnamese', 'Thai', 'Other'].map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </CardContent>

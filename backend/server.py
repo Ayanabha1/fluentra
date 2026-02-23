@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -9,7 +9,7 @@ import json
 import base64
 import asyncio
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -26,7 +26,6 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Setup logging first
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -113,10 +112,11 @@ class OnboardingInput(BaseModel):
 class SessionCreate(BaseModel):
     session_type: str
     plan_id: Optional[str] = None
+    target_duration_minutes: Optional[int] = 30
 
 class SessionComplete(BaseModel):
     metrics: Dict[str, Any] = {}
-    transcript: List[Dict[str, str]] = []
+    transcript: List[Dict[str, Any]] = []
 
 class VocabularyCreate(BaseModel):
     word: str
@@ -204,6 +204,7 @@ async def create_session(input: SessionCreate, user=Depends(get_current_user)):
         "user_id": user["id"],
         "session_type": input.session_type,
         "plan_id": input.plan_id,
+        "target_duration_minutes": input.target_duration_minutes,
         "status": "active",
         "cefr_level_at_start": user.get("cefr_level"),
         "duration_minutes": 0,
@@ -225,26 +226,71 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+    mistakes = await db.mistakes.find({"session_id": session_id}, {"_id": 0}).to_list(100)
+    s["extracted_mistakes"] = mistakes
     return s
 
+async def analyze_session(session_id: str, user_id: str, transcript: list):
+    try:
+        transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript if t.get('text')])
+        if not transcript_text.strip():
+            return
+        prompt = f"""You are a friendly, encouraging English coach analyzing a practice session.
+You genuinely want the student to succeed. Provide a supportive analysis.
+Transcript:
+{transcript_text}
+
+Extract structured data. Respond ONLY with valid JSON:
+{{
+  "summary": "2-3 sentence recap of the conversation with warm, encouraging remarks",
+  "mistakes": ["mistake 1 -> correction", "mistake 2 -> correction"],
+  "new_words": ["word1", "word2"],
+  "other_details": "Any other notable progress or details"
+}}"""
+        response = await asyncio.to_thread(
+            get_gemini_client().models.generate_content,
+            model=TEXT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        analysis = json.loads(response.text)
+        await db.sessions.update_one({"id": session_id}, {"$set": {"analysis": analysis}})
+        logger.info(f"Successfully analyzed session {session_id}")
+    except Exception as e:
+        logger.error(f"Session analysis error: {e}")
+
 @api_router.put("/sessions/{session_id}/complete")
-async def complete_session(session_id: str, input: SessionComplete, user=Depends(get_current_user)):
+async def complete_session(session_id: str, input: SessionComplete, background_tasks: BackgroundTasks, user=Depends(get_current_user)):
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # FIX: Idempotency check — if already completed, return existing data without re-processing
+    if s.get("status") == "completed":
+        logger.info(f"Session {session_id} already completed, returning existing data")
+        return s
+
     now = datetime.now(timezone.utc)
     started = datetime.fromisoformat(s["started_at"])
     duration = (now - started).total_seconds() / 60
+    transcript = input.transcript if input.transcript else s.get("transcript", [])
     update_data = {
         "status": "completed",
         "completed_at": now.isoformat(),
         "duration_minutes": round(duration, 1),
         "metrics": input.metrics if input.metrics else s.get("metrics", {}),
-        "transcript": input.transcript if input.transcript else s.get("transcript", []),
+        "transcript": transcript,
     }
-    await db.sessions.update_one({"id": session_id}, {"$set": update_data})
+    # Atomic update to prevent race conditions causing duplicate session stats
+    update_result = await db.sessions.update_one(
+        {"id": session_id, "user_id": user["id"], "status": "active"}, 
+        {"$set": update_data}
+    )
+    if update_result.modified_count == 0:
+        logger.info(f"Session {session_id} already processed (or not active), skipping duplicate stat increments.")
+        return await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
+
     await db.users.update_one({"id": user["id"]}, {"$inc": {"total_sessions": 1}})
-    # Update streak
     last_session = await db.sessions.find_one(
         {"user_id": user["id"], "status": "completed", "id": {"$ne": session_id}},
         {"_id": 0}, sort=[("completed_at", -1)]
@@ -255,6 +301,7 @@ async def complete_session(session_id: str, input: SessionComplete, user=Depends
         if (now.date() - last_date).days <= 1:
             new_streak = user.get("current_streak", 0) + 1
     await db.users.update_one({"id": user["id"]}, {"$set": {"current_streak": new_streak, "longest_streak": max(new_streak, user.get("longest_streak", 0))}})
+    background_tasks.add_task(analyze_session, session_id, user["id"], transcript)
     return await db.sessions.find_one({"id": session_id}, {"_id": 0})
 
 # ==================== Assessment Scoring ====================
@@ -263,6 +310,12 @@ async def score_assessment(session_id: str, user=Depends(get_current_user)):
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # FIX: Idempotency check — don't re-score an already scored assessment
+    if s.get("assessment_scores"):
+        logger.info(f"Assessment {session_id} already scored, returning cached scores")
+        return s["assessment_scores"]
+
     transcript = s.get("transcript", [])
     transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
     prompt = f"""You are an expert English assessor. Analyze this conversation and provide CEFR scoring.
@@ -277,9 +330,12 @@ Respond ONLY with valid JSON:
 {{"fluency_score":0,"grammar_score":0,"vocabulary_score":0,"confidence_score":0,"weighted_score":0,"cefr_level":"B1","strengths":["str1","str2"],"areas_to_improve":["area1","area2"],"detailed_feedback":"feedback text"}}"""
 
     try:
-        client = get_gemini_client()
-        response = client.models.generate_content(
+        response = get_gemini_client().models.generate_content(
             model=TEXT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        scores = json.loads(response.text)
     except Exception as e:
         logger.error(f"Assessment scoring error: {e}")
         scores = {"fluency_score": 5, "grammar_score": 5, "vocabulary_score": 5, "confidence_score": 5, "weighted_score": 50, "cefr_level": "B1", "strengths": ["Good communication willingness", "Engaged in conversation"], "areas_to_improve": ["Grammar accuracy", "Vocabulary range"], "detailed_feedback": "Assessment completed. Let's work together to improve your English!"}
@@ -429,29 +485,53 @@ async def add_memory(input: MemoryCreateInput, user=Depends(get_current_user)):
 async def websocket_session(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection established")
-    gemini_session = None
+    user_id = None
     try:
         init_data = await websocket.receive_json()
         system_prompt = init_data.get("system_prompt", "You are Fluentra, a friendly English tutor.")
         session_id = init_data.get("session_id", "")
-        logger.info(f"Starting Gemini Live session for: {session_id}")
 
+        if session_id:
+            s_doc = await db.sessions.find_one({"id": session_id})
+            if s_doc:
+                user_id = s_doc.get("user_id")
+
+        if user_id:
+            try:
+                last_session = await db.sessions.find_one(
+                    {"user_id": user_id, "status": "completed", "analysis.summary": {"$exists": True}},
+                    {"_id": 0}, sort=[("started_at", -1)]
+                )
+                if last_session and last_session.get("analysis") and last_session["analysis"].get("summary"):
+                    summary = last_session["analysis"]["summary"]
+                    system_prompt += f"\n\nHere is a short recap of the user's previous session to help you continue where they left off:\n{summary}"
+            except Exception as e:
+                logger.error(f"Failed to fetch previous session summary: {e}")
+
+        logger.info(f"Starting Gemini Live session for: {session_id}")
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(parts=[types.Part(text=system_prompt)]),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
             input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Disable chain-of-thought — the native audio preview model externalises
+            # its reasoning as speech unless thinking is explicitly turned off.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
 
-        async with get_gemini_client().aio.live.connect(
-            model="gemini-live-2.5-flash-native-audio",
+        async with get_gemini_live_client().aio.live.connect(
+            model=LIVE_MODEL,
             config=config
         ) as gemini_session:
             await websocket.send_json({"type": "connected", "message": "Session started"})
+            logger.info("Gemini Live session connected successfully")
+
+            # FIX: Shared flag to signal both tasks to stop cleanly
+            done_event = asyncio.Event()
 
             async def receive_from_client():
                 try:
-                    while True:
+                    while not done_event.is_set():
                         raw = await websocket.receive_text()
                         msg = json.loads(raw)
                         if msg.get("type") == "audio":
@@ -465,42 +545,79 @@ async def websocket_session(websocket: WebSocket):
                                 turn_complete=True
                             )
                         elif msg.get("type") == "end":
+                            done_event.set()
                             return
                 except WebSocketDisconnect:
                     logger.info("Client disconnected")
+                    done_event.set()
                 except Exception as e:
                     logger.error(f"Client receive error: {e}")
+                    done_event.set()
 
             async def send_to_client():
                 try:
-                    async for response in gemini_session:
-                        try:
-                            sc = response.server_content
-                            if sc is None:
-                                continue
-                            if sc.model_turn and sc.model_turn.parts:
-                                for part in sc.model_turn.parts:
-                                    if part.inline_data and part.inline_data.data:
-                                        audio_b64 = base64.b64encode(part.inline_data.data).decode()
-                                        await websocket.send_json({"type": "audio", "data": audio_b64, "mime_type": getattr(part.inline_data, 'mime_type', 'audio/pcm')})
-                                    if part.text:
-                                        await websocket.send_json({"type": "transcript", "data": part.text, "speaker": "ai"})
-                            if hasattr(sc, 'output_transcription') and sc.output_transcription:
-                                text = getattr(sc.output_transcription, 'text', '')
-                                if text:
-                                    await websocket.send_json({"type": "transcript", "data": text, "speaker": "ai"})
-                            if hasattr(sc, 'input_transcription') and sc.input_transcription:
-                                text = getattr(sc.input_transcription, 'text', '')
-                                if text:
-                                    await websocket.send_json({"type": "transcript", "data": text, "speaker": "user"})
-                            if sc.turn_complete:
-                                await websocket.send_json({"type": "turn_complete"})
-                        except Exception as inner_e:
-                            logger.error(f"Response processing error: {inner_e}")
+                    while not done_event.is_set():
+                        turn = gemini_session.receive()
+                        async for response in turn:
+                            # FIX: Stop processing immediately if client disconnected
+                            if done_event.is_set():
+                                return
+                            try:
+                                sc = response.server_content
+                                if sc is None:
+                                    continue
+
+                                if sc.model_turn and sc.model_turn.parts:
+                                    for part in sc.model_turn.parts:
+                                        if part.inline_data and part.inline_data.data:
+                                            audio_b64 = base64.b64encode(part.inline_data.data).decode()
+                                            await websocket.send_json({
+                                                "type": "audio",
+                                                "data": audio_b64,
+                                                "mime_type": getattr(part.inline_data, 'mime_type', 'audio/pcm')
+                                            })
+                                        if part.text:
+                                            await websocket.send_json({
+                                                "type": "transcript",
+                                                "data": part.text,
+                                                "speaker": "ai"
+                                            })
+
+                                if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                                    text = getattr(sc.output_transcription, 'text', '')
+                                    if text:
+                                        await websocket.send_json({"type": "transcript", "data": text, "speaker": "ai"})
+
+                                if hasattr(sc, 'input_transcription') and sc.input_transcription:
+                                    text = getattr(sc.input_transcription, 'text', '')
+                                    if text:
+                                        await websocket.send_json({"type": "transcript", "data": text, "speaker": "user"})
+
+                                if getattr(sc, 'interrupted', False):
+                                    await websocket.send_json({"type": "interrupted"})
+
+                                if sc.turn_complete:
+                                    await websocket.send_json({"type": "turn_complete"})
+                                    break
+
+                            # FIX: Only log actual unexpected errors, not the expected 1005 disconnect noise
+                            except WebSocketDisconnect:
+                                done_event.set()
+                                return
+                            except Exception as inner_e:
+                                err_str = str(inner_e)
+                                if "1005" not in err_str and "1000" not in err_str:
+                                    logger.error(f"Response processing error: {inner_e}")
+                                done_event.set()
+                                return
+
                 except Exception as e:
-                    logger.error(f"Gemini receive error: {e}")
+                    if not done_event.is_set():
+                        logger.error(f"Gemini receive error: {e}")
+                    done_event.set()
 
             await asyncio.gather(receive_from_client(), send_to_client(), return_exceptions=True)
+
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
@@ -521,27 +638,68 @@ async def score_session_ai(session_id: str, user=Depends(get_current_user)):
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # FIX: Idempotency — if already scored, return cached result immediately (no Gemini call)
+    if s.get("metrics", {}).get("overall_score", 0) > 0:
+        logger.info(f"Session {session_id} already scored, returning cached result")
+        return {"metrics": s.get("metrics", {}), "analysis": s.get("analysis", {})}
+
+    # Basic lock to prevent duplicate scoring concurrency
+    lock_res = await db.sessions.update_one(
+        {"id": session_id, "user_id": user["id"], "scoring_in_progress": {"$ne": True}},
+        {"$set": {"scoring_in_progress": True}}
+    )
+    if lock_res.modified_count == 0:
+        logger.warning(f"Session {session_id} is already being scored. Returning 409.")
+        raise HTTPException(status_code=409, detail="Scoring in progress. Please try again in a few seconds.")
+
     transcript = s.get("transcript", [])
     transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
     try:
-        response = get_gemini_client().models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"""Analyze this English tutoring session ({s.get('session_type')}) and score it.
+        try:
+            response = get_gemini_client().models.generate_content(
+                model=TEXT_MODEL,
+                contents=f"""You are Fluentra, a friendly, encouraging English coach scoring a practice session.
+You are deeply supportive and want the student to feel proud of their progress!
+Analyze this session ({s.get('session_type')}) and carefully score it.
 Transcript:
 {transcript_text if transcript_text.strip() else "Short session - provide moderate scores."}
 
 Respond ONLY with valid JSON:
-{{"grammar_accuracy":0,"fluency_wpm":0,"filler_word_count":0,"vocabulary_retention_rate":0,"overall_score":0,"feedback":["point1"],"mistakes":[{{"error_type":"type","severity":"minor","original":"said","corrected":"correct","explanation":"why"}}]}}""",
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        scores = json.loads(response.text)
-    except Exception as e:
-        logger.error(f"Session scoring error: {e}")
-        scores = {"grammar_accuracy": 70, "fluency_wpm": 100, "filler_word_count": 3, "vocabulary_retention_rate": 70, "overall_score": 70, "feedback": ["Good effort!"], "mistakes": []}
-    await db.sessions.update_one({"id": session_id}, {"$set": {"metrics": scores, "feedback": scores.get("feedback", [])}})
-    for m in scores.get("mistakes", []):
-        await db.mistakes.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "error_type": m.get("error_type", "other"), "severity": m.get("severity", "minor"), "original": m.get("original", ""), "corrected": m.get("corrected", ""), "explanation": m.get("explanation", ""), "context": "", "acknowledged": False, "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()})
-    return scores
+{{
+  "metrics": {{
+    "grammar_accuracy": 70,
+    "fluency_wpm": 100,
+    "filler_word_count": 3,
+    "vocabulary_retention_rate": 70,
+    "overall_score": 70,
+    "feedback": ["Great job speaking English today! I loved how you...", "One tiny thing: try to..."]
+  }},
+  "analysis": {{
+    "summary": "A detailed 2-3 sentence summary of the conversation with enthusiastic, supportive remarks.",
+    "other_details": "Any other notable details, like great confidence or improvements.",
+    "new_words": ["word1", "word2"],
+    "mistakes": [
+      {{"error_type": "grammar", "severity": "minor", "original": "wrong sentence", "corrected": "correct sentence", "explanation": "why..."}}
+    ]
+  }}
+}}""",
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            data = json.loads(response.text)
+            metrics = data.get("metrics", {})
+            analysis = data.get("analysis", {})
+        except Exception as e:
+            logger.error(f"Session scoring error: {e}")
+            metrics = {"grammar_accuracy": 70, "fluency_wpm": 100, "filler_word_count": 3, "vocabulary_retention_rate": 70, "overall_score": 70, "feedback": ["Google API limits couldn't process the full detailed feedback right now.", "However, your session practice was still saved successfully! Keep up the great work!"]}
+            analysis = {"summary": "Our AI backend is currently overloaded (Google API Limit), but don't let that stop you. You put in the practice time today and that's exactly how you get fluent!", "other_details": "Points for showing up!", "new_words": [], "mistakes": []}
+
+        await db.sessions.update_one({"id": session_id}, {"$set": {"metrics": metrics, "analysis": analysis, "feedback": metrics.get("feedback", [])}})
+        for m in analysis.get("mistakes", []):
+            await db.mistakes.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "error_type": m.get("error_type", "other"), "severity": m.get("severity", "minor"), "original": m.get("original", ""), "corrected": m.get("corrected", ""), "explanation": m.get("explanation", ""), "context": "", "acknowledged": False, "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()})
+        return {"metrics": metrics, "analysis": analysis}
+    finally:
+        await db.sessions.update_one({"id": session_id}, {"$unset": {"scoring_in_progress": ""}})
 
 app.include_router(api_router)
 
