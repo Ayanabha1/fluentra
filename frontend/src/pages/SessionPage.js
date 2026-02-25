@@ -15,19 +15,8 @@ import api from '@/utils/api';
 // npm install @google/genai
 import { GoogleGenAI } from '@google/genai';
 
-// ─── Output audio: raw Int16 PCM → AudioBuffer ───────────────────────────────
-function createAudioBufferFromRaw(ctx, arrayBuffer) {
-  const rawBytes = new Uint8Array(arrayBuffer);
-  const numFrames = rawBytes.length / 2;
-  const buffer = ctx.createBuffer(1, numFrames, 24000);
-  const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, numFrames);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-  buffer.copyToChannel(float32, 0);
-  return buffer;
-}
 
-// ─── Input audio: Float32 mic → Int16 blob for Gemini ────────────────────────
+
 function float32ToInt16(float32Array) {
   const int16 = new Int16Array(float32Array.length);
   for (let i = 0; i < float32Array.length; i++) {
@@ -51,37 +40,69 @@ function ScoreRing({ value, max = 100, color = '#4ade80', size = 96 }) {
       <circle cx="48" cy="48" r={r} fill="none" stroke="currentColor" strokeWidth="8" className="text-border/30" />
       <circle cx="48" cy="48" r={r} fill="none" stroke={color} strokeWidth="8"
         strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
-        style={{ transition: 'stroke-dasharray 1s cubic-bezier(.4,0,.2,1)' }} />
+        style={{ transition: 'stroke-dasharray 1.2s cubic-bezier(.4,0,.2,1)' }} />
     </svg>
+  );
+}
+
+function RadarBar({ label, value, color = 'hsl(var(--accent))' }) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="w-24 text-xs text-muted-foreground text-right shrink-0">{label}</div>
+      <div className="flex-1 h-2 bg-border/30 rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-1000"
+          style={{ width: `${value || 0}%`, background: color }} />
+      </div>
+      <div className="w-8 text-xs font-mono text-right shrink-0">{value || 0}</div>
+    </div>
   );
 }
 
 function CompletedView({ sessionData, transcript, navigate }) {
   const [activeTab, setActiveTab] = React.useState('summary');
-  const score = sessionData?.metrics?.overall_score || 0;
-  const grammar = sessionData?.metrics?.grammar_accuracy || 0;
-  const wpm = sessionData?.metrics?.fluency_wpm || 0;
-
+  const metrics = sessionData?.metrics || {};
+  const analysis = sessionData?.analysis || {};
+  const score = metrics.overall_score || 0;
   const mistakes = sessionData?.extracted_mistakes?.length
     ? sessionData.extracted_mistakes
-    : (sessionData?.analysis?.mistakes || []);
+    : [];
 
   const scoreColor = score >= 70 ? '#4ade80' : score >= 40 ? '#facc15' : '#f87171';
 
+  const skillBreakdown = metrics.skill_breakdown || {
+    grammar: metrics.grammar_accuracy || 0,
+    vocabulary: metrics.vocabulary_score || 0,
+    fluency: metrics.fluency_wpm ? Math.min(100, Math.round(metrics.fluency_wpm / 1.5)) : 0,
+    confidence: metrics.confidence_score || 0,
+    listening: 0,
+    coherence: 0,
+  };
+
+  const skillColors = {
+    grammar: '#60a5fa',
+    vocabulary: '#a78bfa',
+    fluency: '#34d399',
+    confidence: '#f59e0b',
+    listening: '#f472b6',
+    coherence: '#fb923c',
+  };
+
   const tabs = [
     { id: 'summary', label: 'Summary' },
+    { id: 'skills', label: 'Skills' },
     { id: 'mistakes', label: `Corrections${mistakes.length ? ` (${mistakes.length})` : ''}` },
-    { id: 'vocab', label: 'Vocabulary' },
+    { id: 'homework', label: 'Homework' },
     { id: 'transcript', label: 'Transcript' },
   ];
 
+  const hwTypeIcon = { writing: '✍️', speaking: '🗣️', reading: '📖', grammar: '📝', vocabulary: '📚' };
+
   return (
     <div className="flex-1 overflow-y-auto bg-background">
-      {/* Hero score band */}
+      {/* Hero */}
       <div className="relative overflow-hidden border-b border-border/40"
         style={{ background: 'linear-gradient(135deg, hsl(var(--background)) 0%, hsl(var(--accent)/0.08) 100%)' }}>
-        <div className="max-w-4xl mx-auto px-6 py-10 flex flex-col md:flex-row items-center gap-8">
-          {/* Big score ring */}
+        <div className="max-w-4xl mx-auto px-6 py-8 flex flex-col md:flex-row items-center gap-8">
           <div className="relative flex-shrink-0">
             <ScoreRing value={score} color={scoreColor} size={120} />
             <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -89,110 +110,185 @@ function CompletedView({ sessionData, transcript, navigate }) {
               <span className="text-[10px] uppercase tracking-widest text-muted-foreground">score</span>
             </div>
           </div>
-
-          {/* Title + mini stats */}
           <div className="flex-1 text-center md:text-left">
             <p className="text-xs uppercase tracking-widest text-muted-foreground mb-1">Session Complete</p>
-            <h1 className="text-2xl font-bold mb-4" style={{ fontFamily: 'Fraunces, serif' }}>
+            <h1 className="text-2xl font-bold mb-1" style={{ fontFamily: 'Fraunces, serif' }}>
               {score >= 80 ? 'Excellent work! 🌟' : score >= 60 ? 'Great effort! 💪' : score >= 40 ? 'Good start! 🌱' : 'Keep practising! 🎯'}
             </h1>
-            <div className="flex flex-wrap justify-center md:justify-start gap-6">
-              <div className="text-center">
-                <div className="text-2xl font-bold" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{grammar}%</div>
-                <div className="text-xs text-muted-foreground uppercase tracking-wider mt-0.5">Grammar</div>
-              </div>
-              <div className="w-px bg-border/50 hidden md:block" />
-              <div className="text-center">
-                <div className="text-2xl font-bold" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{wpm}</div>
-                <div className="text-xs text-muted-foreground uppercase tracking-wider mt-0.5">WPM</div>
-              </div>
-              <div className="w-px bg-border/50 hidden md:block" />
-              <div className="text-center">
-                <div className="text-2xl font-bold" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{mistakes.length}</div>
-                <div className="text-xs text-muted-foreground uppercase tracking-wider mt-0.5">Corrections</div>
-              </div>
+            {analysis.encouraging_note && (
+              <p className="text-sm text-muted-foreground mb-3 italic">{analysis.encouraging_note}</p>
+            )}
+            <div className="flex flex-wrap justify-center md:justify-start gap-5 mt-2">
+              {[
+                { label: 'Grammar', val: `${metrics.grammar_accuracy || 0}%` },
+                { label: 'WPM', val: metrics.fluency_wpm || 0 },
+                { label: 'Confidence', val: `${metrics.confidence_score || 0}%` },
+                { label: 'Corrections', val: mistakes.length },
+              ].map(({ label, val }) => (
+                <div key={label} className="text-center">
+                  <div className="text-xl font-bold" style={{ fontFamily: 'JetBrains Mono, monospace' }}>{val}</div>
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">{label}</div>
+                </div>
+              ))}
             </div>
           </div>
-
-          {/* Action buttons */}
           <div className="flex flex-col gap-2 flex-shrink-0">
             <button onClick={() => navigate('/dashboard')}
               className="px-5 py-2.5 rounded-full text-sm font-medium bg-accent text-accent-foreground hover:bg-accent/90 transition-colors"
-              data-testid="session-to-dashboard">
-              Dashboard
-            </button>
+              data-testid="session-to-dashboard">Dashboard</button>
             <button onClick={() => window.location.reload()}
               className="px-5 py-2.5 rounded-full text-sm font-medium border border-border/60 text-muted-foreground hover:border-border hover:text-foreground transition-colors"
-              data-testid="session-reload-btn">
-              Refresh
-            </button>
+              data-testid="session-reload-btn">Refresh</button>
           </div>
         </div>
       </div>
 
       {/* Tab bar */}
       <div className="border-b border-border/40 sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
-        <div className="max-w-4xl mx-auto px-6 flex gap-0">
+        <div className="max-w-4xl mx-auto px-6 flex gap-0 overflow-x-auto">
           {tabs.map(t => (
             <button key={t.id} onClick={() => setActiveTab(t.id)}
-              className={`px-4 py-3.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === t.id
-                ? 'border-accent text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}>
+              className={`px-4 py-3.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === t.id ? 'border-accent text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
               {t.label}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Tab content */}
-      <div className="max-w-4xl mx-auto px-6 py-6">
+      <div className="max-w-4xl mx-auto px-6 py-6 space-y-4">
 
         {/* SUMMARY TAB */}
         {activeTab === 'summary' && (
-          <div className="space-y-5">
+          <div className="space-y-4">
+            {/* Summary card */}
             <div className="rounded-xl border border-border/50 p-5 bg-card">
               <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Session Summary</h3>
-              <p className="text-sm leading-relaxed text-foreground">
-                {sessionData?.analysis?.summary || sessionData?.metrics?.feedback?.[0] || 'Analysis in progress — refresh in a moment.'}
-              </p>
-              {sessionData?.analysis?.other_details && (
-                <p className="text-sm text-muted-foreground mt-4 italic border-l-2 border-accent/40 pl-3">
-                  {sessionData.analysis.other_details}
-                </p>
+              <p className="text-sm leading-relaxed">{analysis.summary || 'Analysis in progress — refresh in a moment.'}</p>
+              {analysis.conversation_topics?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-3">
+                  {analysis.conversation_topics.map((t, i) => (
+                    <span key={i} className="text-xs px-2.5 py-1 rounded-full bg-accent/10 text-accent border border-accent/20">{t}</span>
+                  ))}
+                </div>
               )}
             </div>
-            {sessionData?.metrics?.feedback?.length > 0 && typeof sessionData.metrics.feedback[0] === 'string' && (
+
+            {/* Strengths + Areas side by side */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-xl border border-border/50 p-5 bg-card">
-                <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Tutor Feedback</h3>
+                <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">✅ Strengths</h3>
                 <ul className="space-y-2">
-                  {sessionData.metrics.feedback.map((f, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-foreground">
-                      <span className="text-accent mt-0.5 flex-shrink-0">✦</span>
-                      <span>{f}</span>
-                    </li>
-                  ))}
+                  {(analysis.strengths || []).length > 0
+                    ? analysis.strengths.map((s, i) => (
+                      <li key={i} className="flex gap-2 text-sm">
+                        <span className="text-green-500 shrink-0 mt-0.5">✦</span>
+                        <span>{s}</span>
+                      </li>
+                    ))
+                    : <li className="text-sm text-muted-foreground">Refresh to load strengths.</li>}
                 </ul>
+              </div>
+              <div className="rounded-xl border border-border/50 p-5 bg-card">
+                <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">📈 Areas to Improve</h3>
+                <ul className="space-y-2">
+                  {(analysis.areas_for_improvement || []).length > 0
+                    ? analysis.areas_for_improvement.map((a, i) => (
+                      <li key={i} className="flex gap-2 text-sm">
+                        <span className="text-amber-400 shrink-0 mt-0.5">→</span>
+                        <span>{a}</span>
+                      </li>
+                    ))
+                    : <li className="text-sm text-muted-foreground">Refresh to load areas.</li>}
+                </ul>
+              </div>
+            </div>
+
+            {/* Next session focus */}
+            {analysis.next_session_focus && (
+              <div className="rounded-xl border border-accent/30 bg-accent/5 p-5 flex items-start gap-3">
+                <span className="text-2xl shrink-0">🎯</span>
+                <div>
+                  <p className="text-xs uppercase tracking-widest text-muted-foreground mb-1">Next Session Focus</p>
+                  <p className="text-sm font-medium">{analysis.next_session_focus}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Filler words */}
+            {(analysis.filler_words_used || []).length > 0 && (
+              <div className="rounded-xl border border-border/50 p-5 bg-card">
+                <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">🗣️ Filler Words Used ({metrics.filler_word_count || 0} times)</h3>
+                <div className="flex flex-wrap gap-2">
+                  {analysis.filler_words_used.map((w, i) => (
+                    <span key={i} className="px-3 py-1 text-sm rounded-full bg-destructive/10 text-destructive border border-destructive/20">"{w}"</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* New vocabulary */}
+            {(analysis.new_words || []).length > 0 && (
+              <div className="rounded-xl border border-border/50 p-5 bg-card">
+                <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">📚 Vocabulary from This Session</h3>
+                <div className="flex flex-wrap gap-2">
+                  {analysis.new_words.map((w, i) => (
+                    <span key={i} className="px-4 py-1.5 text-sm rounded-full border border-accent/40 text-accent bg-accent/5 hover:bg-accent/15 transition-colors cursor-default">{w}</span>
+                  ))}
+                </div>
               </div>
             )}
           </div>
         )}
 
-        {/* MISTAKES TAB */}
+        {/* SKILLS TAB */}
+        {activeTab === 'skills' && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border/50 p-5 bg-card">
+              <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-5">Skill Breakdown</h3>
+              <div className="space-y-4">
+                {Object.entries(skillBreakdown).map(([skill, val]) => (
+                  <RadarBar key={skill} label={skill.charAt(0).toUpperCase() + skill.slice(1)}
+                    value={val} color={skillColors[skill] || 'hsl(var(--accent))'} />
+                ))}
+              </div>
+            </div>
+
+            {/* Score cards grid */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {[
+                { label: 'Overall Score', val: score, suffix: '/100', color: scoreColor },
+                { label: 'Grammar', val: metrics.grammar_accuracy, suffix: '%' },
+                { label: 'Speaking Speed', val: metrics.fluency_wpm, suffix: ' wpm' },
+                { label: 'Confidence', val: metrics.confidence_score, suffix: '%' },
+                { label: 'Vocabulary', val: metrics.vocabulary_score, suffix: '%' },
+                { label: 'Pronunciation', val: metrics.pronunciation_score, suffix: '%' },
+              ].map(({ label, val, suffix, color }) => (
+                <div key={label} className="rounded-xl border border-border/50 bg-card p-4 text-center">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">{label}</div>
+                  <div className="text-2xl font-bold" style={{ fontFamily: 'JetBrains Mono, monospace', color: color || undefined }}>
+                    {val || 0}{suffix}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* CORRECTIONS TAB */}
         {activeTab === 'mistakes' && (
           <div>
             {mistakes.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="text-4xl mb-3">🎉</div>
                 <p className="text-lg font-semibold mb-1" style={{ fontFamily: 'Fraunces, serif' }}>No corrections needed!</p>
-                <p className="text-sm text-muted-foreground">Flawless session — your grammar was on point.</p>
+                <p className="text-sm text-muted-foreground">Flawless grammar — well done.</p>
               </div>
             ) : (
               <div className="space-y-3">
                 {mistakes.map((m, i) => (
-                  <div key={i} className="rounded-xl border border-border/50 bg-card overflow-hidden">
-                    <div className="flex items-start gap-3 p-4">
-                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-destructive/10 text-destructive flex items-center justify-center text-xs font-bold mt-0.5">{i + 1}</span>
+                  <div key={i} className="rounded-xl border border-border/50 bg-card p-4">
+                    <div className="flex items-start gap-3">
+                      <span className="shrink-0 w-6 h-6 rounded-full bg-destructive/10 text-destructive flex items-center justify-center text-xs font-bold mt-0.5">{i + 1}</span>
                       <div className="flex-1 min-w-0">
                         {typeof m === 'string' ? (
                           <>
@@ -201,7 +297,12 @@ function CompletedView({ sessionData, transcript, navigate }) {
                           </>
                         ) : (
                           <>
-                            <p className="text-sm text-destructive line-through mb-1">{m.original}</p>
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <p className="text-sm text-destructive line-through">{m.original}</p>
+                              {m.severity && (
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-medium ${m.severity === 'major' ? 'bg-destructive/15 text-destructive' : m.severity === 'moderate' ? 'bg-amber-500/15 text-amber-500' : 'bg-muted text-muted-foreground'}`}>{m.severity}</span>
+                              )}
+                            </div>
                             <p className="text-sm text-green-500 font-medium mb-2">→ {m.corrected}</p>
                             {m.explanation && (
                               <p className="text-xs text-muted-foreground bg-muted/40 rounded-lg px-3 py-2">{m.explanation}</p>
@@ -217,24 +318,35 @@ function CompletedView({ sessionData, transcript, navigate }) {
           </div>
         )}
 
-        {/* VOCAB TAB */}
-        {activeTab === 'vocab' && (
+        {/* HOMEWORK TAB */}
+        {activeTab === 'homework' && (
           <div>
-            {sessionData?.analysis?.new_words?.length > 0 ? (
-              <div>
-                <p className="text-xs uppercase tracking-widest text-muted-foreground mb-4">Words from this session</p>
-                <div className="flex flex-wrap gap-2">
-                  {sessionData.analysis.new_words.map((w, i) => (
-                    <span key={i}
-                      className="px-4 py-2 rounded-full text-sm font-medium border border-accent/40 text-accent bg-accent/5 hover:bg-accent/15 transition-colors cursor-default">
-                      {w}
-                    </span>
-                  ))}
-                </div>
+            {(analysis.homework || []).length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <div className="text-4xl mb-3">📭</div>
+                <p className="text-sm text-muted-foreground">No homework assigned for this session.</p>
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center py-16 text-center">
-                <p className="text-sm text-muted-foreground">No new vocabulary recorded for this session.</p>
+              <div className="space-y-3">
+                {analysis.homework.map((hw, i) => (
+                  <div key={i} className="rounded-xl border border-border/50 bg-card p-5">
+                    <div className="flex items-start gap-3">
+                      <span className="text-2xl shrink-0">{hwTypeIcon[hw.type] || '📝'}</span>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <h4 className="text-sm font-semibold">{hw.title}</h4>
+                          {hw.estimated_minutes && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">~{hw.estimated_minutes} min</span>
+                          )}
+                          {hw.type && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground capitalize">{hw.type}</span>
+                          )}
+                        </div>
+                        <p className="text-sm text-muted-foreground leading-relaxed">{hw.description}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -248,14 +360,10 @@ function CompletedView({ sessionData, transcript, navigate }) {
             ) : (
               transcript.map((t, i) => (
                 <div key={i} className={`flex gap-3 ${t.speaker === 'user' ? 'flex-row-reverse' : ''}`}>
-                  <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold uppercase
-                    ${t.speaker === 'user' ? 'bg-accent/20 text-accent' : 'bg-muted text-muted-foreground'}`}>
+                  <div className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold uppercase ${t.speaker === 'user' ? 'bg-accent/20 text-accent' : 'bg-muted text-muted-foreground'}`}>
                     {t.speaker === 'user' ? 'You' : 'AI'}
                   </div>
-                  <div className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed
-                    ${t.speaker === 'user'
-                      ? 'bg-accent/10 text-foreground rounded-tr-sm'
-                      : 'bg-muted/50 text-foreground rounded-tl-sm'}`}>
+                  <div className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${t.speaker === 'user' ? 'bg-accent/10 text-foreground rounded-tr-sm' : 'bg-muted/50 text-foreground rounded-tl-sm'}`}>
                     {t.text}
                   </div>
                 </div>
@@ -275,14 +383,7 @@ export default function SessionPage() {
   const [status, setStatus] = useState('loading');
   const [voiceState, setVoiceState] = useState('idle');
   const [transcript, setTranscript] = useState([]);
-  const transcriptRef = useRef([]); // always in sync, never stale in callbacks
-  const setTranscriptSync = (updater) => {
-    // Apply updater to ref immediately, then schedule React state sync
-    transcriptRef.current = typeof updater === 'function'
-      ? updater(transcriptRef.current)
-      : updater;
-    setTranscript([...transcriptRef.current]);
-  };
+  const transcriptRef = useRef([]); // always in sync — mutate directly, then call setTranscript
 
   const [muted, setMuted] = useState(false);
   const [textInput, setTextInput] = useState('');
@@ -324,8 +425,13 @@ export default function SessionPage() {
     nextStartTimeRef.current = ctx.currentTime;
   }, []);
 
+  // Debounced scroll — smooth scroll on every delta causes browser jank during audio
+  const scrollDebounceRef = useRef(null);
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
+    scrollDebounceRef.current = setTimeout(() => {
+      transcriptEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    }, 150);
   }, [transcript]);
 
   useEffect(() => {
@@ -342,6 +448,11 @@ export default function SessionPage() {
   }, [sessionId]);
 
   const buildSystemPrompt = () => {
+    // Plan sessions have a system_prompt stored in the session doc (written by curriculum AI).
+    // Always prefer this — it's been tailored to the student's level and progress.
+    if (sessionData?.system_prompt) return sessionData.system_prompt;
+
+    // Generic fallback for ad-hoc sessions (not from a plan)
     const type = sessionData?.session_type || 'speaking';
     const level = user?.cefr_level || 'B1';
     const nativeLang = user?.native_language || 'their native language';
@@ -359,18 +470,25 @@ Rules:
 - Keep responses concise — this is about THEIR speaking practice.`;
   };
 
-  // Schedule incoming PCM audio from Gemini
-  const playAudio = useCallback((data) => {
+  // Schedule incoming PCM audio from Gemini — mirrors audio-orb's decodeAudioData
+  // Must be async because the decode step (Int16→Float32→AudioBuffer) returns a Promise
+  const playAudio = useCallback(async (data) => {
     const ctx = outputAudioContextRef.current;
     const gain = outputGainRef.current;
     if (!ctx || !gain || ctx.state === 'closed') return;
 
-    // data is base64 string from SDK onmessage
+    // Decode base64 → Uint8Array (mirrors audio-orb's decode())
     const binaryStr = atob(data);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
 
-    const audioBuffer = createAudioBufferFromRaw(ctx, bytes.buffer);
+    // Build AudioBuffer from raw Int16 PCM — same logic as audio-orb's decodeAudioData()
+    const dataInt16 = new Int16Array(bytes.buffer);
+    const dataFloat32 = new Float32Array(dataInt16.length);
+    for (let i = 0; i < dataInt16.length; i++) dataFloat32[i] = dataInt16[i] / 32768.0;
+    const audioBuffer = ctx.createBuffer(1, dataFloat32.length, 24000);
+    audioBuffer.copyToChannel(dataFloat32, 0);
+
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(gain);
@@ -393,7 +511,10 @@ Rules:
     try {
       let sid = sessionId;
       if (!sid) {
-        const res = await api.post('/sessions', { session_type: 'speaking', target_duration_minutes: sessionDuration });
+        const res = await api.post('/sessions', {
+          session_type: 'speaking',
+          target_duration_minutes: sessionDuration,
+        });
         sid = res.data.id;
         setSessionId(sid);
         setSessionData(res.data);
@@ -418,13 +539,16 @@ Rules:
       // connect() resolves, then use the ref in onopen via a deferred open handler.
       let _onOpenCalled = false;
       const _pendingOpen = () => {
-        // Called after geminiSessionRef.current is set (see below)
         setStatus('active');
         voiceStateRef.current = 'listening';
         setVoiceState('listening');
+        // Start mic first so the audio output context is resumed and ready
+        // BEFORE the AI starts speaking — prevents the first audio chunk being dropped.
         startMicrophone(geminiSessionRef.current);
+        // Kick off the AI's opening greeting. The system_prompt tells it exactly
+        // how to greet — this just signals "your turn to speak first".
         geminiSessionRef.current.sendClientContent({
-          turns: [{ role: 'user', parts: [{ text: 'Hello! I am ready to start.' }] }],
+          turns: [{ role: 'user', parts: [{ text: 'Hello, please start the session.' }] }],
           turnComplete: true,
         });
       };
@@ -433,6 +557,9 @@ Rules:
         model: model,
         config: {
           responseModalities: ['AUDIO'],
+          // ── Enable live transcription for both speakers ─────────────────
+          outputAudioTranscription: {},
+          inputAudioTranscription: {},
         },
         callbacks: {
           onopen: () => {
@@ -442,100 +569,106 @@ Rules:
             if (geminiSessionRef.current) _pendingOpen();
           },
 
-          onmessage: (message) => {
+          onmessage: async (message) => {
             // ── Audio ──────────────────────────────────────────────────────
             const audioPart = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
             if (audioPart?.data) {
               playAudio(audioPart.data);
             }
 
-            // ── Helpers (operate on ref directly — never stale) ────────────
-            const appendToSpeaker = (speaker, text, isFinished) => {
-              const cur = transcriptRef.current;
-              let lastIndex = -1;
-              for (let i = cur.length - 1; i >= 0; i--) {
-                if (cur[i].speaker === speaker) { lastIndex = i; break; }
-              }
-
-              if (lastIndex !== -1 && !cur[lastIndex].final) {
-                // Append delta to existing open bubble for this speaker
-                setTranscriptSync(prev => {
-                  const newPrev = [...prev];
-                  const lastText = newPrev[lastIndex].text || '';
-                  const sep = lastText.endsWith(' ') ? '' : ' ';
-                  newPrev[lastIndex] = {
-                    ...newPrev[lastIndex],
-                    text: text ? lastText + sep + text : lastText,
-                    final: !!isFinished
-                  };
-                  return newPrev;
-                });
-              } else {
-                // Open new bubble for this speaker (only if there's text)
-                if (text || isFinished) {
-                  setTranscriptSync(prev => [...prev, { speaker, text: text || '', final: !!isFinished }]);
-                }
-              }
-            };
-
             // ── AI output transcription (incremental deltas) ───────────────
-            const outputTrans = message.serverContent?.outputTranscription;
-            if (outputTrans) {
-              appendToSpeaker('ai', outputTrans.text, outputTrans.finished);
+            const outputTranscript = message.serverContent?.outputTranscription?.text;
+            if (outputTranscript) {
+              // Always read ref fresh — never use closure-captured values
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && last.speaker === 'ai' && !last.final) {
+                // Same AI turn still open — append delta
+                // Don't add space if: last char is space OR delta starts with space/punctuation
+                const needsSep = last.text.length > 0
+                  && !last.text.endsWith(' ')
+                  && !outputTranscript.startsWith(' ')
+                  && !outputTranscript.startsWith(',')
+                  && !outputTranscript.startsWith('.');
+                const sep = needsSep ? ' ' : '';
+                transcriptRef.current = [
+                  ...cur.slice(0, -1),
+                  { ...last, text: last.text + sep + outputTranscript }
+                ];
+              } else {
+                // New AI turn — close any open user bubble first
+                const base = (last && !last.final)
+                  ? [...cur.slice(0, -1), { ...last, final: true }]
+                  : cur;
+                transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
+              }
+              aiTurnOpenRef.current = true;
+              userTurnOpenRef.current = false;
+              setTranscript([...transcriptRef.current]);
             }
 
             // ── User input transcription (incremental deltas) ──────────────
-            const inputTrans = message.serverContent?.inputTranscription;
-            if (inputTrans) {
-              appendToSpeaker('user', inputTrans.text, inputTrans.finished);
+            const inputTranscript = message.serverContent?.inputTranscription?.text;
+            if (inputTranscript) {
+              // Always read ref fresh
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && last.speaker === 'user' && !last.final) {
+                // Same user turn still open — append delta
+                const needsSep = last.text.length > 0
+                  && !last.text.endsWith(' ')
+                  && !inputTranscript.startsWith(' ')
+                  && !inputTranscript.startsWith(',')
+                  && !inputTranscript.startsWith('.');
+                const sep = needsSep ? ' ' : '';
+                transcriptRef.current = [
+                  ...cur.slice(0, -1),
+                  { ...last, text: last.text + sep + inputTranscript }
+                ];
+              } else {
+                // New user turn — close any open AI bubble first
+                const base = (last && !last.final)
+                  ? [...cur.slice(0, -1), { ...last, final: true }]
+                  : cur;
+                transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
+              }
+              userTurnOpenRef.current = true;
+              aiTurnOpenRef.current = false;
+              setTranscript([...transcriptRef.current]);
             }
 
             // ── Turn complete ──────────────────────────────────────────────
             if (message.serverContent?.turnComplete) {
+              aiTurnOpenRef.current = false;
+              userTurnOpenRef.current = false;
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
-              setTranscriptSync(prev => {
-                const newPrev = [...prev];
-                // Finalize both the AI and User active bubbles when turn completes.
-                let lastAiIndex = -1;
-                for (let i = newPrev.length - 1; i >= 0; i--) {
-                  if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
-                }
-                if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
-                  newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
-                }
-
-                let lastUserIndex = -1;
-                for (let i = newPrev.length - 1; i >= 0; i--) {
-                  if (newPrev[i].speaker === 'user') { lastUserIndex = i; break; }
-                }
-                if (lastUserIndex !== -1 && !newPrev[lastUserIndex].final) {
-                  newPrev[lastUserIndex] = { ...newPrev[lastUserIndex], final: true };
-                }
-
-                return newPrev;
-              });
+              const cur = transcriptRef.current;
+              if (cur.length && !cur[cur.length - 1].final) {
+                transcriptRef.current = [
+                  ...cur.slice(0, -1),
+                  { ...cur[cur.length - 1], final: true }
+                ];
+                setTranscript([...transcriptRef.current]);
+              }
             }
 
             // ── Interrupted (user barged in mid-AI-response) ───────────────
             if (message.serverContent?.interrupted) {
+              aiTurnOpenRef.current = false;
+              userTurnOpenRef.current = false;
               for (const src of sourcesRef.current) { try { src.stop(); } catch (_) { } }
               sourcesRef.current.clear();
+              // Mirror audio-orb: reset to 0 (not currentTime)
               nextStartTimeRef.current = 0;
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
-
-              setTranscriptSync(prev => {
-                const newPrev = [...prev];
-                let lastAiIndex = -1;
-                for (let i = newPrev.length - 1; i >= 0; i--) {
-                  if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
-                }
-                if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
-                  newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
-                }
-                return newPrev;
-              });
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && !last.final) {
+                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
+                setTranscript([...transcriptRef.current]);
+              }
             }
           },
 
@@ -567,26 +700,38 @@ Rules:
 
   const startMicrophone = async (session) => {
     try {
+      // Match audio-orb: {audio: true} — no echoCancellation/noiseSuppression/autoGainControl
+      // Browser audio processing can fight with Gemini's VAD causing false triggers
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: true,
         video: false,
       });
       streamRef.current = stream;
 
-      // 256 samples = 16ms chunks — correct for direct Gemini connection (no relay jitter).
-      // Gemini's VAD works best with small continuous chunks, not large batched ones.
       const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(256, 1, 1);
+
+      // Match audio-orb: bufferSize = 256
+      const bufferSize = 256;
+      scriptProcessorRef.current = inputCtx.createScriptProcessor(bufferSize, 1, 1);
 
       scriptProcessorRef.current.onaudioprocess = (e) => {
         if (mutedRef.current || !session) return;
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = float32ToInt16(float32);
-        // Send directly to Gemini SDK — no backend hop
+        const pcmData = e.inputBuffer.getChannelData(0);
+
+        // Float32 → Int16 (matches audio-orb's createBlob)
+        const int16 = float32ToInt16(pcmData);
+        const bytes = new Uint8Array(int16.buffer);
+
+        // Base64 encode — char-by-char like audio-orb's encode() function
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+
         session.sendRealtimeInput({
           media: {
-            data: btoa(String.fromCharCode(...new Uint8Array(int16.buffer))),
+            data: btoa(binary),
             mimeType: 'audio/pcm;rate=16000',
           }
         });
@@ -607,9 +752,8 @@ Rules:
       turns: [{ role: 'user', parts: [{ text: textInput }] }],
       turnComplete: true,
     });
-    startTransition(() => {
-      setTranscript(prev => [...prev, { speaker: 'user', text: textInput, final: true }]);
-    });
+    transcriptRef.current = [...transcriptRef.current, { speaker: 'user', text: textInput, final: true }];
+    setTranscript([...transcriptRef.current]);
     setTextInput('');
   };
 
@@ -628,7 +772,6 @@ Rules:
     for (const src of sourcesRef.current) { try { src.stop(); } catch (_) { } }
     sourcesRef.current.clear();
     setVoiceState('processing');
-    setStatus('assessing');
 
     try {
       // Sanitize transcript: mark any unclosed partials as final, drop empty entries
@@ -636,12 +779,11 @@ Rules:
         .filter(t => t.text && t.text.trim().length > 0)
         .map(t => ({ ...t, final: true }));
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
-
-      // Artificial delay to make scoring feel comprehensive
-      await new Promise(r => setTimeout(r, 3500));
-
-      const scoreRes = await api.post(`/ai/score-session?session_id=${sessionId}`);
-      setSessionData(prev => ({ ...prev, status: 'completed', transcript: cleanTranscript, ...scoreRes.data }));
+      await api.post(`/ai/score-session?session_id=${sessionId}`);
+      // Fetch the full session from DB — this gives us analysis, metrics,
+      // AND extracted_mistakes (joined from mistakes collection) all in one shot.
+      const fullSession = await api.get(`/sessions/${sessionId}`);
+      setSessionData(fullSession.data);
       toast.success('Session completed and scored!');
     } catch {
       toast.error('Session saved but scoring failed. Retry later!');
@@ -707,11 +849,11 @@ Rules:
         </Button>
       </div>
 
-      {(status === 'loading' || status === 'connecting' || status === 'assessing') && (
+      {(status === 'loading' || status === 'connecting') && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <VoiceVisualizer state="processing" size="md" />
-            <p className="mt-12 text-muted-foreground">{status === 'loading' ? 'Loading...' : status === 'connecting' ? 'Connecting...' : 'Analyzing performance...'}</p>
+            <p className="mt-12 text-muted-foreground">{status === 'loading' ? 'Loading...' : 'Connecting...'}</p>
           </div>
         </div>
       )}

@@ -57,7 +57,7 @@ def get_gemini_live_client():
     return gemini_live_client
 
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
-TEXT_MODEL = "gemini-2.5-flash"
+TEXT_MODEL = "gemini-2.5-pro"  # 1500 req/day free vs gemini-2.5-flash 20 req/day
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'fluentra-secret-key-change-in-production')
 JWT_ALGORITHM = "HS256"
@@ -112,6 +112,10 @@ class OnboardingInput(BaseModel):
 class SessionCreate(BaseModel):
     session_type: str
     plan_id: Optional[str] = None
+    plan_module_index: Optional[int] = None    # which module (0-indexed)
+    plan_session_index: Optional[int] = None   # which session within module (0-indexed)
+    plan_session_id: Optional[str] = None      # e.g. "<plan_id>_week_2_3"
+    system_prompt: Optional[str] = None        # baked-in prompt from plan session template
     target_duration_minutes: Optional[int] = 30
 
 class SessionComplete(BaseModel):
@@ -204,6 +208,10 @@ async def create_session(input: SessionCreate, user=Depends(get_current_user)):
         "user_id": user["id"],
         "session_type": input.session_type,
         "plan_id": input.plan_id,
+        "plan_module_index": input.plan_module_index,
+        "plan_session_index": input.plan_session_index,
+        "plan_session_id": input.plan_session_id,   # e.g. "<plan_id>_week_2_3"
+        "system_prompt": input.system_prompt,        # stored so live-token can read it
         "target_duration_minutes": input.target_duration_minutes,
         "status": "active",
         "cefr_level_at_start": user.get("cefr_level"),
@@ -232,7 +240,9 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
 
 async def analyze_session(session_id: str, user_id: str, transcript: list):
     try:
-        transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript if t.get('text')])
+        import re
+        def _clean(t): return re.sub(r'  +', ' ', t.get('text', '')).strip()
+        transcript_text = "\n".join([f"{t.get('speaker','?')}: {_clean(t)}" for t in transcript if _clean(t)])
         if not transcript_text.strip():
             return
         prompt = f"""You are an expert English tutor analyzing a session.
@@ -246,12 +256,23 @@ Extract structured data. Respond ONLY with valid JSON:
   "new_words": ["word1", "word2"],
   "other_details": "Any other notable progress or details"
 }}"""
-        response = await asyncio.to_thread(
-            get_gemini_client().models.generate_content,
-            model=TEXT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        async def _do_analyze():
+            for attempt in range(3):
+                try:
+                    return await asyncio.to_thread(
+                        get_gemini_client().models.generate_content,
+                        model=TEXT_MODEL,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                except Exception as e:
+                    if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt < 2:
+                        wait = 15 * (2 ** attempt)
+                        logger.warning(f"Analyze rate limited, retrying in {wait}s")
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+        response = await _do_analyze()
         analysis = json.loads(response.text)
         await db.sessions.update_one({"id": session_id}, {"$set": {"analysis": analysis}})
         logger.info(f"Successfully analyzed session {session_id}")
@@ -272,7 +293,10 @@ async def complete_session(session_id: str, input: SessionComplete, background_t
     now = datetime.now(timezone.utc)
     started = datetime.fromisoformat(s["started_at"])
     duration = (now - started).total_seconds() / 60
+    # Always prefer input transcript (frontend sends clean version); fall back to stored
     transcript = input.transcript if input.transcript else s.get("transcript", [])
+    # Ensure all entries are marked final
+    transcript = [dict(t, final=True) for t in transcript if t.get("text", "").strip()]
     update_data = {
         "status": "completed",
         "completed_at": now.isoformat(),
@@ -296,8 +320,11 @@ async def complete_session(session_id: str, input: SessionComplete, background_t
     return await db.sessions.find_one({"id": session_id}, {"_id": 0})
 
 # ==================== Assessment Scoring ====================
+class ScoreAssessmentInput(BaseModel):
+    transcript: list = []
+
 @api_router.post("/sessions/{session_id}/score-assessment")
-async def score_assessment(session_id: str, user=Depends(get_current_user)):
+async def score_assessment(session_id: str, input: ScoreAssessmentInput = ScoreAssessmentInput(), user=Depends(get_current_user)):
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -307,7 +334,8 @@ async def score_assessment(session_id: str, user=Depends(get_current_user)):
         logger.info(f"Assessment {session_id} already scored, returning cached scores")
         return s["assessment_scores"]
 
-    transcript = s.get("transcript", [])
+    # Prefer transcript from payload (live, always fresh) — fall back to DB
+    transcript = input.transcript if input.transcript else s.get("transcript", [])
     transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
     prompt = f"""You are an expert English assessor. Analyze this conversation and provide CEFR scoring.
 
@@ -349,29 +377,114 @@ async def generate_learning_plan(user=Depends(get_current_user)):
     target_level = user.get("target_cefr_level", "B2")
     goals = user.get("learning_goals", [])
     spw = user.get("sessions_per_week", 3)
-    prompt = f"""Create a personalized English learning plan.
-Current CEFR: {current_level}, Target: {target_level}, Goals: {', '.join(goals)}, Sessions/week: {spw}.
-Create 4-8 weekly modules with session templates.
+    prompt = f"""You are an expert English curriculum designer. Create a personalized spoken English learning plan.
 
-Respond ONLY with valid JSON:
-{{"estimated_weeks":8,"modules":[{{"title":"Week 1: Title","week_number":1,"focus_areas":["grammar","vocabulary"],"difficulty":"easy","session_templates":[{{"type":"vocabulary","title":"Title","description":"Desc","duration_minutes":20,"focus":"focus"}}]}}]}}"""
+Student profile:
+- Current CEFR level: {current_level}
+- Target CEFR level: {target_level}
+- Learning goals: {', '.join(goals) if goals else "General English improvement"}
+- Sessions per week: {spw}
+- Each session is EXACTLY 10 minutes (voice conversation with AI tutor)
+
+Create exactly 4 weekly modules. Each module must have EXACTLY {spw} sessions.
+Sessions are SEQUENTIAL and PROGRESSIVE — each builds on the previous one.
+
+For EVERY session, write a "system_prompt" field. This is the FULL instruction given to the AI voice tutor for that session. It must:
+1. Start: "You are Fluentra, a warm English coach. This is [Week X, Session Y]."
+2. Specify the EXACT topic and activity for the 10 minutes
+3. List 2-3 specific phrases, structures, or vocabulary to introduce
+4. Describe how to correct errors for a {current_level} student (gently, inline)
+5. End instruction: "Close the session by summarizing what was practiced in one sentence."
+
+Difficulty progression:
+- Week 1: Very easy, welcoming, short sentences, present tense only
+- Week 2: Slightly harder, introduce past tense, more vocabulary
+- Week 3: Medium, complex sentences, opinions
+- Week 4: Consolidation, mix of all skills
+
+Respond ONLY with valid JSON matching this EXACT structure:
+{{
+  "estimated_weeks": 4,
+  "modules": [
+    {{
+      "title": "Week 1: Daily Life",
+      "week_number": 1,
+      "focus_areas": ["introductions", "present tense"],
+      "difficulty": "easy",
+      "sessions": [
+        {{
+          "type": "speaking",
+          "title": "Introducing Yourself",
+          "description": "Practice introducing yourself with name, job, and where you live",
+          "duration_minutes": 10,
+          "system_prompt": "You are Fluentra, a warm English coach. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by asking their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Ask 3-4 simple follow-up questions. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
+        }}
+      ]
+    }}
+  ]
+}}"""
 
     try:
-        response = get_gemini_client().models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+        response = get_gemini_client().models.generate_content(
+            model=TEXT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
         plan_data = json.loads(response.text)
     except Exception as e:
         logger.error(f"Plan generation error: {e}")
-        plan_data = {"estimated_weeks": 8, "modules": [
-            {"title": f"Week {i+1}: {'Foundations' if i<2 else 'Development' if i<5 else 'Mastery'}", "week_number": i+1, "focus_areas": ["grammar", "vocabulary", "speaking"], "difficulty": "easy" if i<2 else "medium" if i<5 else "hard",
-             "session_templates": [{"type": "vocabulary", "title": "Word Power", "description": "Learn new vocabulary", "duration_minutes": 20, "focus": "vocabulary"}, {"type": "speaking", "title": "Conversation", "description": "Practice speaking", "duration_minutes": 25, "focus": "speaking"}, {"type": "grammar", "title": "Grammar Clinic", "description": "Grammar exercises", "duration_minutes": 20, "focus": "grammar"}]}
-            for i in range(8)
-        ]}
+        week_titles = ["Foundations", "Building Skills", "Fluency Practice", "Consolidation"]
+        week_difficulties = ["easy", "medium", "medium", "hard"]
+        fallback_modules = []
+        for w in range(4):
+            fallback_sessions = []
+            for s in range(spw):
+                if w == 0 and s == 0:
+                    opening = "Start with a warm welcome and ask the student about themselves."
+                else:
+                    opening = "Briefly recap what was covered last session, then continue with today's practice."
+                fallback_sessions.append({
+                    "type": "speaking",
+                    "title": "Week " + str(w+1) + " - Session " + str(s+1),
+                    "description": "Introductions and basics" if w == 0 else "Conversation practice building on previous sessions",
+                    "duration_minutes": 10,
+                    "system_prompt": (
+                        "You are Fluentra, a warm English coach. This is Week " + str(w+1) + ", Session " + str(s+1) + ". "
+                        "Conduct a 10-minute speaking session for a " + current_level + " student. "
+                        + opening + " "
+                        "Focus on natural conversation. Correct errors gently by repeating the correct form naturally. "
+                        "End with: Great session! Today you practiced speaking in English."
+                    )
+                })
+            fallback_modules.append({
+                "title": "Week " + str(w+1) + ": " + week_titles[w],
+                "week_number": w + 1,
+                "focus_areas": ["speaking", "vocabulary"],
+                "difficulty": week_difficulties[w],
+                "sessions": fallback_sessions,
+            })
+        plan_data = {"estimated_weeks": 4, "modules": fallback_modules}
+
+    plan_id = str(uuid.uuid4())
+
+    # Stamp every session with a deterministic plan_session_id.
+    # Status: first session of week 1 = "unlocked", all others = "locked".
+    # Sessions unlock one-by-one as each is completed.
+    raw_modules = plan_data.get("modules", [])
+    first_session = True
+    for mod in raw_modules:
+        week_num = mod.get("week_number", 1)
+        for seq, sess in enumerate(mod.get("sessions", []), start=1):
+            sess["plan_session_id"] = f"{plan_id}_week_{week_num}_{seq}"
+            sess["status"] = "unlocked" if first_session else "locked"
+            sess["duration_minutes"] = min(sess.get("duration_minutes", 10), 10)  # enforce 10 min cap
+            first_session = False
 
     plan = {
-        "id": str(uuid.uuid4()), "user_id": user["id"], "current_cefr_level": current_level, "target_cefr_level": target_level,
+        "id": plan_id, "user_id": user["id"], "current_cefr_level": current_level, "target_cefr_level": target_level,
         "estimated_weeks": plan_data.get("estimated_weeks", 8),
         "estimated_completion_date": (datetime.now(timezone.utc) + timedelta(weeks=plan_data.get("estimated_weeks", 8))).isoformat(),
-        "sessions_per_week": spw, "modules": plan_data.get("modules", []),
+        "sessions_per_week": spw, "modules": raw_modules,
         "current_module_index": 0, "adaptation_history": [], "is_active": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -488,8 +601,9 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
     if not s_doc:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Optionally append previous session summary for continuity
-    system_prompt = input.system_prompt
+    # Prefer system_prompt baked into the session doc (from plan template).
+    # Fall back to whatever the frontend sent.
+    system_prompt = s_doc.get("system_prompt") or input.system_prompt
     try:
         last_session = await db.sessions.find_one(
             {"user_id": user["id"], "status": "completed", "analysis.summary": {"$exists": True},
@@ -515,7 +629,6 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                         "system_instruction": system_prompt,
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
-                        "thinking_config": {"thinking_budget": 0},
                     }
                 },
                 "http_options": {"api_version": "v1alpha"},
@@ -678,45 +791,285 @@ async def websocket_session(websocket: WebSocket):
 # ==================== AI Session Scoring ====================
 @api_router.post("/ai/score-session")
 async def score_session_ai(session_id: str, user=Depends(get_current_user)):
+    import re
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # FIX: Idempotency — if already scored, return cached result immediately (no Gemini call)
+    # Idempotency — if already scored, return cached result immediately
     if s.get("metrics", {}).get("overall_score", 0) > 0:
         logger.info(f"Session {session_id} already scored, returning cached result")
         return {"metrics": s.get("metrics", {}), "analysis": s.get("analysis", {})}
 
     transcript = s.get("transcript", [])
-    transcript_text = "\n".join([f"{t.get('speaker','?')}: {t.get('text','')}" for t in transcript])
-    try:
-        response = get_gemini_client().models.generate_content(
-            model=TEXT_MODEL,
-            contents=f"""Analyze this English tutoring session ({s.get('session_type')}) and score it.
-Transcript:
-{transcript_text if transcript_text.strip() else "Short session - provide moderate scores."}
+    cefr = user.get("cefr_level", "B1")
+    session_type = s.get("session_type", "speaking")
 
-Respond ONLY with valid JSON:
+    def clean_text(t):
+        return re.sub(r"  +", " ", t.get("text", "")).strip()
+
+    transcript_text = "\n".join([
+        f"{t.get('speaker','?').upper()}: {clean_text(t)}"
+        for t in transcript if clean_text(t)
+    ])
+    logger.info(f"Scoring session {session_id}, transcript length: {len(transcript_text)} chars")
+
+    async def call_with_retry(fn, retries=3, base_delay=15):
+        for attempt in range(retries):
+            try:
+                return fn()
+            except Exception as e:
+                if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt < retries - 1:
+                    wait = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limited, retrying in {wait}s (attempt {attempt+1}/{retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
+    prompt = f"""You are an expert English language coach. Deeply analyze this {session_type} session for a {cefr}-level student and return a comprehensive evaluation.
+
+TRANSCRIPT:
+{transcript_text if transcript_text.strip() else "Very short session — provide conservative but encouraging scores."}
+
+Return ONLY valid JSON with this exact structure:
 {{
-  "grammar_accuracy": 70,
-  "fluency_wpm": 100,
-  "filler_word_count": 3,
-  "vocabulary_retention_rate": 70,
-  "overall_score": 70,
-  "feedback": ["Detailed feedback point 1", "Detailed feedback point 2"],
-  "mistakes": [{{"error_type": "grammar", "severity": "minor", "original": "said", "corrected": "correct", "explanation": "why"}}]
-}}""",
+  "overall_score": 72,
+  "grammar_accuracy": 68,
+  "fluency_wpm": 95,
+  "confidence_score": 70,
+  "vocabulary_score": 65,
+  "pronunciation_score": 72,
+  "filler_word_count": 4,
+  "topic_relevance_score": 80,
+
+  "skill_breakdown": {{
+    "grammar": 68,
+    "vocabulary": 65,
+    "fluency": 72,
+    "confidence": 70,
+    "listening": 75,
+    "coherence": 68
+  }},
+
+  "summary": "2-3 sentence recap of what was discussed and the student's overall performance.",
+
+  "strengths": [
+    "Specific strength 1 with example from transcript",
+    "Specific strength 2 with example from transcript"
+  ],
+
+  "areas_for_improvement": [
+    "Specific area 1 with concrete advice",
+    "Specific area 2 with concrete advice"
+  ],
+
+  "homework": [
+    {{
+      "title": "Exercise title",
+      "description": "Detailed description of what to do",
+      "estimated_minutes": 15,
+      "type": "writing|speaking|reading|grammar|vocabulary"
+    }}
+  ],
+
+  "new_words": ["word1", "word2"],
+
+  "mistakes": [
+    {{
+      "original": "what they said",
+      "corrected": "what they should say",
+      "explanation": "why this is wrong and how to remember the correct form",
+      "error_type": "grammar|vocabulary|pronunciation|structure",
+      "severity": "minor|moderate|major"
+    }}
+  ],
+
+  "encouraging_note": "A warm, personalized 1-2 sentence motivational note based on their specific progress.",
+
+  "next_session_focus": "One specific topic or skill to focus on next session based on their weaknesses.",
+
+  "filler_words_used": ["um", "uh"],
+
+  "conversation_topics": ["topic1", "topic2"],
+
+  "other_details": "Any other noteworthy observation about their learning style or progress."
+}}"""
+
+    try:
+        response = await call_with_retry(lambda: get_gemini_client().models.generate_content(
+            model=TEXT_MODEL,
+            contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        ))
         scores = json.loads(response.text)
     except Exception as e:
-        logger.error(f"Session scoring error: {e}")
-        scores = {"grammar_accuracy": 70, "fluency_wpm": 100, "filler_word_count": 3, "vocabulary_retention_rate": 70, "overall_score": 70, "feedback": ["Good effort! Session saved successfully."], "mistakes": []}
+        logger.error(f"Session scoring error for {session_id}: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        scores = {
+            "overall_score": 0, "grammar_accuracy": 0, "fluency_wpm": 0,
+            "confidence_score": 0, "vocabulary_score": 0, "pronunciation_score": 0,
+            "filler_word_count": 0, "topic_relevance_score": 0,
+            "skill_breakdown": {"grammar": 0, "vocabulary": 0, "fluency": 0, "confidence": 0, "listening": 0, "coherence": 0},
+            "summary": f"Scoring failed: {str(e)[:100]}", "strengths": [], "areas_for_improvement": [],
+            "homework": [], "new_words": [], "mistakes": [],
+            "encouraging_note": "Keep practising!", "next_session_focus": "General conversation",
+            "filler_words_used": [], "conversation_topics": [], "other_details": ""
+        }
 
-    await db.sessions.update_one({"id": session_id}, {"$set": {"metrics": scores, "feedback": scores.get("feedback", [])}})
+    metrics = {
+        "overall_score": scores.get("overall_score", 0),
+        "grammar_accuracy": scores.get("grammar_accuracy", 0),
+        "fluency_wpm": scores.get("fluency_wpm", 0),
+        "confidence_score": scores.get("confidence_score", 0),
+        "vocabulary_score": scores.get("vocabulary_score", 0),
+        "pronunciation_score": scores.get("pronunciation_score", 0),
+        "filler_word_count": scores.get("filler_word_count", 0),
+        "topic_relevance_score": scores.get("topic_relevance_score", 0),
+        "skill_breakdown": scores.get("skill_breakdown", {}),
+    }
+
+    analysis = {
+        "summary": scores.get("summary", ""),
+        "strengths": scores.get("strengths", []),
+        "areas_for_improvement": scores.get("areas_for_improvement", []),
+        "homework": scores.get("homework", []),
+        "new_words": scores.get("new_words", []),
+        "mistakes": [],  # structured mistakes stored in db.mistakes separately
+        "encouraging_note": scores.get("encouraging_note", ""),
+        "next_session_focus": scores.get("next_session_focus", ""),
+        "filler_words_used": scores.get("filler_words_used", []),
+        "conversation_topics": scores.get("conversation_topics", []),
+        "other_details": scores.get("other_details", ""),
+    }
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {"$set": {"metrics": metrics, "analysis": analysis, "feedback": scores.get("strengths", [])}}
+    )
+
     for m in scores.get("mistakes", []):
-        await db.mistakes.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "error_type": m.get("error_type", "other"), "severity": m.get("severity", "minor"), "original": m.get("original", ""), "corrected": m.get("corrected", ""), "explanation": m.get("explanation", ""), "context": "", "acknowledged": False, "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()})
-    return scores
+        if m.get("original") and m.get("corrected"):
+            await db.mistakes.insert_one({
+                "id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id,
+                "error_type": m.get("error_type", "grammar"), "severity": m.get("severity", "minor"),
+                "original": m.get("original", ""), "corrected": m.get("corrected", ""),
+                "explanation": m.get("explanation", ""), "context": "", "acknowledged": False,
+                "recurrence": 1, "created_at": datetime.now(timezone.utc).isoformat()
+            })
+
+    # ── Update plan: complete current session, unlock next, adapt its prompt ────
+    plan_session_id = s.get("plan_session_id")
+    plan_id_ref = s.get("plan_id")
+    plan_mod_idx = s.get("plan_module_index")
+    plan_sess_idx = s.get("plan_session_index")
+
+    if plan_id_ref and (plan_session_id or (plan_mod_idx is not None and plan_sess_idx is not None)):
+        plan_doc = await db.learning_plans.find_one({"id": plan_id_ref}, {"_id": 0})
+        if plan_doc:
+            modules = plan_doc.get("modules", [])
+
+            # ── Step 1: Find and mark the just-completed session ──────────────
+            completed_mod_i = None
+            completed_sess_i = None
+
+            for mi, mod in enumerate(modules):
+                for si, tmpl in enumerate(mod.get("sessions", [])):
+                    match = (
+                        (plan_session_id and tmpl.get("plan_session_id") == plan_session_id) or
+                        (plan_mod_idx == mi and plan_sess_idx == si)
+                    )
+                    if match:
+                        tmpl["status"] = "completed"
+                        tmpl["completed_session_id"] = session_id
+                        tmpl["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        completed_mod_i = mi
+                        completed_sess_i = si
+                        break
+                if completed_mod_i is not None:
+                    break
+
+            if completed_mod_i is not None:
+                # ── Step 2: Find the next locked session ─────────────────────
+                next_sess = None
+                next_mod_i = completed_mod_i
+                next_sess_i = completed_sess_i + 1
+                # If past end of current module, move to next module
+                if next_sess_i >= len(modules[next_mod_i].get("sessions", [])):
+                    next_mod_i += 1
+                    next_sess_i = 0
+                if next_mod_i < len(modules) and next_sess_i < len(modules[next_mod_i].get("sessions", [])):
+                    next_sess = modules[next_mod_i]["sessions"][next_sess_i]
+
+                # ── Step 3: Unlock the next session ──────────────────────────
+                if next_sess:
+                    next_sess["status"] = "unlocked"
+
+                # ── Step 4: Adaptively rewrite next session's system_prompt ──
+                # Use scores from THIS session to tailor the next session's prompt
+                if next_sess and next_sess.get("system_prompt"):
+                    try:
+                        top_mistakes = [
+                            f"'{m.get('original')}' → should be '{m.get('corrected')}' ({m.get('explanation', '')})"
+                            for m in scores.get("mistakes", [])[:3] if m.get("original")
+                        ]
+                        adapt_prompt = f"""You are an expert English curriculum designer.
+A student just completed a 10-minute English speaking session. Based on their performance, rewrite the system_prompt for their NEXT session to be perfectly tailored to their needs.
+
+JUST-COMPLETED SESSION PERFORMANCE:
+- Overall score: {scores.get('overall_score', 0)}/100
+- Grammar accuracy: {scores.get('grammar_accuracy', 0)}%
+- Confidence: {scores.get('confidence_score', 0)}%
+- Fluency WPM: {scores.get('fluency_wpm', 0)}
+- Key mistakes made: {json.dumps(top_mistakes) if top_mistakes else "None significant"}
+- Areas for improvement: {json.dumps(scores.get('areas_for_improvement', [])[:2])}
+- Next session focus recommended: {scores.get('next_session_focus', 'general practice')}
+
+NEXT SESSION'S ORIGINAL PLAN:
+Title: {next_sess.get('title')}
+Original system_prompt: {next_sess.get('system_prompt')}
+
+REWRITE RULES:
+- Keep the same topic/title but weave in targeted review of the mistakes above
+- If score < 50: slow down, revisit basics, be extra gentle and encouraging
+- If score 50-75: build on strengths, gently address weak areas mid-session
+- If score > 75: add slightly more complexity, introduce new vocabulary
+- The tutor must naturally slip in correction of top mistakes without making it feel like drilling
+- Keep it a 10-minute voice session — warm, conversational, progressive
+- Start with acknowledging progress from last session
+
+Respond ONLY with the new system_prompt string (no JSON wrapper, just the plain text instruction)."""
+
+                        adapt_response = await call_with_retry(lambda: get_gemini_client().models.generate_content(
+                            model=TEXT_MODEL,
+                            contents=adapt_prompt,
+                        ))
+                        new_prompt = adapt_response.text.strip().strip('"')
+                        if new_prompt and len(new_prompt) > 50:
+                            next_sess["system_prompt"] = new_prompt
+                            next_sess["prompt_adapted_from"] = session_id
+                            logger.info(f"Adapted next session prompt for {next_sess.get('plan_session_id')}")
+                    except Exception as e:
+                        logger.error(f"Failed to adapt next session prompt: {e}")
+                        # Keep original prompt — not a fatal error
+
+                # ── Step 5: Advance current_module_index if module done ───────
+                extra_updates = {}
+                cur_mod_idx = plan_doc.get("current_module_index", 0)
+                cur_mod = modules[cur_mod_idx] if cur_mod_idx < len(modules) else None
+                if cur_mod and all(t.get("status") == "completed" for t in cur_mod.get("sessions", [])):
+                    cur_mod["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    if cur_mod_idx + 1 < len(modules):
+                        extra_updates["current_module_index"] = cur_mod_idx + 1
+                        logger.info(f"Module {cur_mod_idx} complete — advancing to {cur_mod_idx + 1}")
+
+                await db.learning_plans.update_one(
+                    {"id": plan_id_ref},
+                    {"$set": {"modules": modules, **extra_updates}}
+                )
+                logger.info(f"Plan updated: completed session {plan_session_id}, unlocked next")
+
+    return {"metrics": metrics, "analysis": analysis}
 
 app.include_router(api_router)
 

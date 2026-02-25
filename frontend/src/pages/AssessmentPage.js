@@ -11,37 +11,29 @@ import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
 
-// ─── Audio helpers (from friend's utils.ts) ───────────────────────────────────
+// ─── The @google/genai SDK must be in your package.json ──────────────────────
+import { GoogleGenAI } from '@google/genai';
 
-function decodeBase64ToBytes(base64) {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
-  return bytes;
-}
-
-function createAudioBuffer(ctx, rawBytes) {
-  const numChannels = 1;
-  const sampleRate = 24000;
-  const numFrames = rawBytes.length / 2 / numChannels;
-  const buffer = ctx.createBuffer(numChannels, numFrames, sampleRate);
-  const dataInt16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, numFrames);
-  const dataFloat32 = new Float32Array(dataInt16.length);
-  for (let i = 0; i < dataInt16.length; i++) {
-    dataFloat32[i] = dataInt16[i] / 32768.0;
-  }
-  buffer.copyToChannel(dataFloat32, 0);
+// ─── Output audio: raw Int16 PCM → AudioBuffer ───────────────────────────────
+function createAudioBufferFromRaw(ctx, arrayBuffer) {
+  const rawBytes = new Uint8Array(arrayBuffer);
+  const numFrames = rawBytes.length / 2;
+  const buffer = ctx.createBuffer(1, numFrames, 24000);
+  const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, numFrames);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+  buffer.copyToChannel(float32, 0);
   return buffer;
 }
 
-function float32ToBase64Pcm(pcmData) {
-  const int16 = new Int16Array(pcmData.length);
-  for (let i = 0; i < pcmData.length; i++) int16[i] = pcmData[i] * 32768;
-  let binary = '';
-  const bytes = new Uint8Array(int16.buffer);
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+// ─── Input audio: Float32 mic → Int16 blob for Gemini ────────────────────────
+function float32ToInt16(float32Array) {
+  const int16 = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    int16[i] = s * 32768;
+  }
+  return int16;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,14 +99,20 @@ export default function AssessmentPage() {
   const [sessionId, setSessionId] = useState(null);
   const [status, setStatus] = useState('intro');
   const [voiceState, setVoiceState] = useState('idle');
+  const voiceStateRef = useRef('idle');
   const [transcript, setTranscript] = useState([]);
   const [stageIndex, setStageIndex] = useState(0);
   const [scores, setScores] = useState(null);
   const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(false);
   const [error, setError] = useState(null);
   const [stageJustChanged, setStageJustChanged] = useState(false);
+  const [scoringStep, setScoringStep] = useState('');
 
-  const wsRef = useRef(null);
+  const geminiSessionRef = useRef(null);
+  const transcriptRef = useRef([]);
+  const aiTurnOpenRef = useRef(false);
+  const userTurnOpenRef = useRef(false);
   const streamRef = useRef(null);
   const sourceNodeRef = useRef(null);
   const scriptProcessorRef = useRef(null);
@@ -185,12 +183,17 @@ export default function AssessmentPage() {
     }
   }, [transcript, status, stageIndex]);
 
-  const handleIncomingAudio = useCallback((rawBytes) => {
+  const playAudio = useCallback((data) => {
     const ctx = outputAudioContextRef.current;
     const gain = outputGainRef.current;
     if (!ctx || !gain || ctx.state === 'closed') return;
 
-    const audioBuffer = createAudioBuffer(ctx, rawBytes);
+    // data is base64 string from SDK onmessage
+    const binaryStr = atob(data);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+    const audioBuffer = createAudioBufferFromRaw(ctx, bytes.buffer);
 
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
@@ -202,6 +205,11 @@ export default function AssessmentPage() {
 
     sourcesRef.current.add(src);
     src.addEventListener('ended', () => sourcesRef.current.delete(src));
+
+    if (voiceStateRef.current !== 'speaking') {
+      voiceStateRef.current = 'speaking';
+      setVoiceState('speaking');
+    }
   }, []);
 
   const startAssessment = async () => {
@@ -212,115 +220,152 @@ export default function AssessmentPage() {
       await outputAudioContextRef.current.resume();
       nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
 
-      const res = await api.post('/sessions', { session_type: 'assessment' });
-      setSessionId(res.data.id);
-      await connectWebSocket(res.data.id);
+      let sid = sessionId;
+      if (!sid) {
+        const res = await api.post('/sessions', { session_type: 'assessment' });
+        sid = res.data.id;
+        setSessionId(sid);
+      }
+
+      const tokenRes = await api.post('/sessions/live-token', {
+        session_id: sid,
+        system_prompt: SYSTEM_PROMPT,
+      });
+      const { token, model } = tokenRes.data;
+
+      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: 'v1alpha' } });
+
+      let _onOpenCalled = false;
+      const _pendingOpen = () => {
+        setStatus('active');
+        voiceStateRef.current = 'listening';
+        setVoiceState('listening');
+        startMicrophone(geminiSessionRef.current);
+        geminiSessionRef.current.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text: 'Hello! I am ready to start my assessment.' }] }],
+          turnComplete: true,
+        });
+      };
+
+      const session = await ai.live.connect({
+        model: model,
+        config: {
+          responseModalities: ['AUDIO'],
+        },
+        callbacks: {
+          onopen: () => {
+            _onOpenCalled = true;
+            if (geminiSessionRef.current) _pendingOpen();
+          },
+
+          onmessage: (message) => {
+            const audioPart = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
+            if (audioPart?.data) {
+              playAudio(audioPart.data);
+            }
+
+            const outputTranscript = message.serverContent?.outputTranscription?.text;
+            if (outputTranscript) {
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && last.speaker === 'ai' && !last.final) {
+                const sep = last.text.endsWith(' ') ? '' : ' ';
+                transcriptRef.current = [
+                  ...cur.slice(0, -1),
+                  { ...last, text: last.text + sep + outputTranscript }
+                ];
+              } else {
+                const base = (last && !last.final)
+                  ? [...cur.slice(0, -1), { ...last, final: true }]
+                  : cur;
+                transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
+              }
+              aiTurnOpenRef.current = true;
+              userTurnOpenRef.current = false;
+              setTranscript([...transcriptRef.current]);
+            }
+
+            const inputTranscript = message.serverContent?.inputTranscription?.text;
+            if (inputTranscript) {
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && last.speaker === 'user' && !last.final) {
+                const sep = last.text.endsWith(' ') ? '' : ' ';
+                transcriptRef.current = [
+                  ...cur.slice(0, -1),
+                  { ...last, text: last.text + sep + inputTranscript }
+                ];
+              } else {
+                const base = (last && !last.final)
+                  ? [...cur.slice(0, -1), { ...last, final: true }]
+                  : cur;
+                transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
+              }
+              userTurnOpenRef.current = true;
+              aiTurnOpenRef.current = false;
+              setTranscript([...transcriptRef.current]);
+            }
+
+            if (message.serverContent?.turnComplete) {
+              voiceStateRef.current = 'listening';
+              setVoiceState('listening');
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && !last.final) {
+                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
+                setTranscript([...transcriptRef.current]);
+              }
+              aiTurnOpenRef.current = false;
+              userTurnOpenRef.current = false;
+            }
+
+            if (message.serverContent?.interrupted) {
+              for (const source of sourcesRef.current.values()) {
+                try { source.stop(); } catch (e) { }
+              }
+              sourcesRef.current.clear();
+              nextStartTimeRef.current = 0;
+              voiceStateRef.current = 'listening';
+              setVoiceState('listening');
+
+              const cur = transcriptRef.current;
+              const last = cur[cur.length - 1];
+              if (last && !last.final) {
+                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
+                setTranscript([...transcriptRef.current]);
+              }
+              aiTurnOpenRef.current = false;
+              userTurnOpenRef.current = false;
+            }
+          },
+
+          onclose: () => {
+            if (status === 'active') {
+              voiceStateRef.current = 'idle';
+              setVoiceState('idle');
+            }
+          },
+
+          onerror: (err) => {
+            console.error('Gemini error:', err);
+            setError('Connection error. Please try again.');
+            setStatus('intro');
+          }
+        }
+      });
+      geminiSessionRef.current = session;
+      if (_onOpenCalled) _pendingOpen();
     } catch (err) {
-      setError('Failed to create session');
+      if (err.response && err.response.data && err.response.data.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError('Failed to create session');
+      }
       setStatus('intro');
     }
   };
 
-  const connectWebSocket = async (sid) => {
-    const backendUrl = process.env.REACT_APP_BACKEND_URL;
-    const wsUrl = backendUrl.replace('https', 'wss').replace('http', 'ws') + '/api/ws/session';
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ system_prompt: SYSTEM_PROMPT, session_id: sid }));
-    };
-
-    ws.onmessage = async (event) => {
-      if (event.data instanceof Blob) {
-        const arrayBuffer = await event.data.arrayBuffer();
-        handleIncomingAudio(new Uint8Array(arrayBuffer));
-        setVoiceState('speaking');
-        return;
-      }
-
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'connected') {
-        setStatus('active');
-        setVoiceState('listening');
-        startMicrophone();
-        ws.send(JSON.stringify({ type: 'text', data: 'Hello! I am ready to start my assessment.' }));
-      } else if (msg.type === 'audio') {
-        handleIncomingAudio(decodeBase64ToBytes(msg.data));
-        setVoiceState('speaking');
-      } else if (msg.type === 'transcript') {
-        setTranscript(prev => {
-          const newPrev = [...prev];
-          let lastIndex = -1;
-          for (let i = newPrev.length - 1; i >= 0; i--) {
-            if (newPrev[i].speaker === msg.speaker) { lastIndex = i; break; }
-          }
-
-          const delta = msg.data || '';
-          if (lastIndex !== -1 && !newPrev[lastIndex].final) {
-            newPrev[lastIndex] = { ...newPrev[lastIndex], text: newPrev[lastIndex].text + delta };
-            return newPrev;
-          }
-          return [...newPrev, { speaker: msg.speaker, text: delta, final: false }];
-        });
-      } else if (msg.type === 'turn_complete') {
-        setVoiceState('listening');
-        setTranscript(prev => {
-          const newPrev = [...prev];
-          let lastAiIndex = -1;
-          for (let i = newPrev.length - 1; i >= 0; i--) {
-            if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
-          }
-          if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
-            newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
-          }
-
-          let lastUserIndex = -1;
-          for (let i = newPrev.length - 1; i >= 0; i--) {
-            if (newPrev[i].speaker === 'user') { lastUserIndex = i; break; }
-          }
-          if (lastUserIndex !== -1 && !newPrev[lastUserIndex].final) {
-            newPrev[lastUserIndex] = { ...newPrev[lastUserIndex], final: true };
-          }
-          return newPrev;
-        });
-      } else if (msg.type === 'interrupted') {
-        for (const source of sourcesRef.current.values()) {
-          try { source.stop(); } catch (e) { }
-          sourcesRef.current.delete(source);
-        }
-        nextStartTimeRef.current = 0;
-        setVoiceState('listening');
-        setTranscript(prev => {
-          const newPrev = [...prev];
-          let lastAiIndex = -1;
-          for (let i = newPrev.length - 1; i >= 0; i--) {
-            if (newPrev[i].speaker === 'ai') { lastAiIndex = i; break; }
-          }
-          if (lastAiIndex !== -1 && !newPrev[lastAiIndex].final) {
-            newPrev[lastAiIndex] = { ...newPrev[lastAiIndex], final: true };
-          }
-
-          let lastUserIndex = -1;
-          for (let i = newPrev.length - 1; i >= 0; i--) {
-            if (newPrev[i].speaker === 'user') { lastUserIndex = i; break; }
-          }
-          if (lastUserIndex !== -1 && !newPrev[lastUserIndex].final) {
-            newPrev[lastUserIndex] = { ...newPrev[lastUserIndex], final: true };
-          }
-          return newPrev;
-        });
-      } else if (msg.type === 'error') {
-        setError(msg.message);
-        setStatus('intro');
-      }
-    };
-
-    ws.onerror = () => { setError('Connection error. Please try again.'); setStatus('intro'); };
-    ws.onclose = () => { if (status === 'active') setVoiceState('idle'); };
-  };
-
-  const startMicrophone = async () => {
+  const startMicrophone = async (sessionInstance) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -328,15 +373,32 @@ export default function AssessmentPage() {
       });
       streamRef.current = stream;
 
-      const inputCtx = inputAudioContextRef.current;
+      const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
-      // bufferSize=256 for lower latency (from friend's demo)
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(256, 1, 1);
+      scriptProcessorRef.current = inputCtx.createScriptProcessor(2048, 1, 1);
 
       scriptProcessorRef.current.onaudioprocess = (e) => {
-        if (muted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-        const pcmData = e.inputBuffer.getChannelData(0);
-        wsRef.current.send(JSON.stringify({ type: 'audio', data: float32ToBase64Pcm(pcmData) }));
+        if (mutedRef.current || isEndingRef.current || !sessionInstance) return;
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = float32ToInt16(float32);
+        const bytes = new Uint8Array(int16.buffer);
+
+        let binary = '';
+        const chunkSize = 1024;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+
+        try {
+          sessionInstance.sendRealtimeInput({
+            media: {
+              data: btoa(binary),
+              mimeType: 'audio/pcm;rate=16000',
+            }
+          });
+        } catch (err) {
+          console.warn('Realtime send failed (maybe not fully open):', err);
+        }
       };
 
       sourceNodeRef.current.connect(scriptProcessorRef.current);
@@ -351,7 +413,9 @@ export default function AssessmentPage() {
     if (isEndingRef.current) return;
     isEndingRef.current = true;
 
-    if (wsRef.current) { wsRef.current.send(JSON.stringify({ type: 'end' })); wsRef.current.close(); }
+    if (geminiSessionRef.current) {
+      try { geminiSessionRef.current.disconnect(); } catch (e) { }
+    }
     if (scriptProcessorRef.current) scriptProcessorRef.current.disconnect();
     if (sourceNodeRef.current) sourceNodeRef.current.disconnect();
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
@@ -359,22 +423,26 @@ export default function AssessmentPage() {
     sourcesRef.current.clear();
 
     setStatus('scoring');
+    voiceStateRef.current = 'idle';
     setVoiceState('idle');
 
     try {
       // Clean up transcript
-      const cleanTranscript = transcript
+      const cleanTranscript = transcriptRef.current
         .filter(t => t.text && t.text.trim().length > 0)
         .map(t => ({ ...t, final: true }));
 
+      setScoringStep('Storing Data...');
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
 
-      // Artificial delay to allow user to see "Analyzing your performance..."
-      await new Promise(r => setTimeout(r, 5000));
-
-      const res = await api.post(`/sessions/${sessionId}/score-assessment`);
+      setScoringStep('Assessing conversation...');
+      const res = await api.post(`/sessions/${sessionId}/score-assessment`, { transcript: cleanTranscript });
       setScores(res.data);
+
+      setScoringStep('Creating Customized Learning Plan...');
       await api.post('/learning-plan/generate');
+
+      setScoringStep('Finalizing...');
       const me = await api.get('/auth/me');
       updateUser(me.data);
       setStatus('done');
@@ -498,7 +566,7 @@ export default function AssessmentPage() {
           <div className="text-center">
             <VoiceVisualizer state="processing" size="md" />
             <p className="mt-12 text-muted-foreground">
-              {status === 'connecting' ? 'Connecting to your tutor...' : 'Analyzing your performance...'}
+              {status === 'connecting' ? 'Connecting to your tutor...' : (scoringStep || 'Analyzing your performance...')}
             </p>
           </div>
         </div>
@@ -547,9 +615,9 @@ export default function AssessmentPage() {
           {/* Voice visualizer */}
           <div className="flex-1 flex flex-col items-center justify-center py-8">
             <VoiceVisualizer state={voiceState} size="lg" />
-            <p className="text-xs text-muted-foreground mt-4">
+            {/* <p className="text-xs text-muted-foreground mt-4">
               {voiceState === 'speaking' ? 'Tutor is speaking...' : voiceState === 'listening' ? 'Listening...' : ''}
-            </p>
+            </p> */}
           </div>
 
           {/* Transcript */}
@@ -571,7 +639,7 @@ export default function AssessmentPage() {
 
           {/* Controls */}
           <div className="flex items-center justify-center gap-4 p-4 border-t border-border/50">
-            <Button variant="outline" size="icon" className="rounded-full w-12 h-12" onClick={() => setMuted(!muted)} data-testid="mute-toggle">
+            <Button variant="outline" size="icon" className="rounded-full w-12 h-12" onClick={() => { setMuted(!muted); mutedRef.current = !muted; }} data-testid="mute-toggle">
               {muted ? <MicOff size={20} className="text-destructive" /> : <Mic size={20} />}
             </Button>
             <Button

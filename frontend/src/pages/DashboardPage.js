@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Flame, BookOpen, TrendingUp, Play, Clock, Award, ArrowRight, BarChart3 } from 'lucide-react';
+import { toast } from 'sonner';
 import api from '@/utils/api';
 import { motion } from 'framer-motion';
 
@@ -48,6 +49,11 @@ export default function DashboardPage() {
       navigate(`/session/${res.data.id}`);
     } catch (err) {
       console.error(err);
+      if (err.response && err.response.data && err.response.data.detail) {
+        toast.error(err.response.data.detail);
+      } else {
+        toast.error("Failed to start session");
+      }
     }
   };
 
