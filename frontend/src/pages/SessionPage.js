@@ -1,9 +1,8 @@
-import React, { useState, useRef, useCallback, useEffect, startTransition } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { toast } from 'sonner';
@@ -431,7 +430,9 @@ export default function SessionPage() {
   const [status, setStatus] = useState('loading');
   const [voiceState, setVoiceState] = useState('idle');
   const [transcript, setTranscript] = useState([]);
-  const transcriptRef = useRef([]); // always in sync — mutate directly, then call setTranscript
+  // Transcript is accumulated silently during the session (never triggers React renders).
+  // It is flushed to React state ONLY when the session ends, keeping the audio hot-path free.
+  const transcriptRef = useRef([]);
 
   const [muted, setMuted] = useState(false);
   const [textInput, setTextInput] = useState('');
@@ -447,8 +448,6 @@ export default function SessionPage() {
   const isEndingRef = useRef(false);
   const voiceStateRef = useRef('idle');
   const mutedRef = useRef(false);
-  const userTurnOpenRef = useRef(false); // true while user turn is open → append deltas
-  const aiTurnOpenRef = useRef(false);   // true while AI turn is open → append deltas
 
   // Audio contexts — created once, matching audio-orb's class fields
   // audio-orb: private inputAudioContext = new AudioContext({sampleRate: 16000})
@@ -463,7 +462,6 @@ export default function SessionPage() {
   const outputGainRef = useRef(null);
   const sourcesRef = useRef(new Set());
   const nextStartTimeRef = useRef(0);
-  const transcriptEndRef = useRef(null);
 
   const { user } = useAuth();
   const { theme, toggleTheme } = useTheme();
@@ -479,25 +477,9 @@ export default function SessionPage() {
     nextStartTimeRef.current = ctx.currentTime;
   }, []);
 
-  // Debounced transcript flush — accumulate deltas in ref, flush to React every 300ms
-  // This is the KEY difference from before: audio scheduling is never blocked by renders
-  const transcriptFlushRef = useRef(null);
-  const flushTranscript = useCallback(() => {
-    if (transcriptFlushRef.current) return; // already scheduled
-    transcriptFlushRef.current = setTimeout(() => {
-      transcriptFlushRef.current = null;
-      setTranscript([...transcriptRef.current]);
-    }, 300);
-  }, []);
-
-  // Debounced scroll
-  const scrollDebounceRef = useRef(null);
-  useEffect(() => {
-    if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
-    scrollDebounceRef.current = setTimeout(() => {
-      transcriptEndRef.current?.scrollIntoView({ behavior: 'instant' });
-    }, 150);
-  }, [transcript]);
+  // No real-time transcript flush — transcript is accumulated silently and
+  // shown only after the session ends.  This keeps the onmessage callback
+  // as lightweight as audio-orb (decode → schedule → done).
 
   useEffect(() => {
     if (!sessionId) { setStatus('ready'); return; }
@@ -591,9 +573,9 @@ Rules:
             if (geminiSessionRef.current) _pendingOpen();
           },
 
-          // ── audio-orb: onmessage — INLINED audio decode (not a separate function!) ──
-          onmessage: async (message) => {
-            // ── Audio playback: EXACT copy of audio-orb's onmessage audio block ──
+          // ── audio-orb: onmessage — keep as lightweight as possible ──
+          onmessage: (message) => {
+            // ── Audio playback: EXACT copy of audio-orb's onmessage ──
             const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
 
             if (audio) {
@@ -619,7 +601,7 @@ Rules:
               nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
               sourcesRef.current.add(source);
 
-              // UI state (not in audio-orb, but needed for visualizer)
+              // Update visualizer only on transition (not every chunk)
               if (voiceStateRef.current !== 'speaking') {
                 voiceStateRef.current = 'speaking';
                 setVoiceState('speaking');
@@ -634,72 +616,44 @@ Rules:
                 sourcesRef.current.delete(source);
               }
               nextStartTimeRef.current = 0;
-
-              // UI bookkeeping (not in audio-orb)
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
-              aiTurnOpenRef.current = false;
-              userTurnOpenRef.current = false;
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
-              if (last && !last.final) {
-                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
-                setTranscript([...transcriptRef.current]);
-              }
             }
 
-            // ── Transcription (non-blocking: accumulate in ref, flush debounced) ──
-            const outputTranscript = message.serverContent?.outputTranscription?.text;
-            if (outputTranscript) {
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
+            // ── Transcription: accumulate silently in mutable array ──
+            // No React state updates, no array spreading — just push.
+            // Transcript is only shown after the session ends.
+            const outputText = message.serverContent?.outputTranscription?.text;
+            if (outputText) {
+              const arr = transcriptRef.current;
+              const last = arr[arr.length - 1];
               if (last && last.speaker === 'ai' && !last.final) {
-                const sep = last.text.endsWith(' ') || outputTranscript.startsWith(' ') ? '' : ' ';
-                transcriptRef.current = [
-                  ...cur.slice(0, -1),
-                  { ...last, text: last.text + sep + outputTranscript }
-                ];
+                last.text += (last.text.endsWith(' ') || outputText.startsWith(' ') ? '' : ' ') + outputText;
               } else {
-                const base = (last && !last.final)
-                  ? [...cur.slice(0, -1), { ...last, final: true }]
-                  : cur;
-                transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
+                if (last && !last.final) last.final = true;
+                arr.push({ speaker: 'ai', text: outputText, final: false });
               }
-              flushTranscript(); // debounced — won't block audio
             }
 
-            const inputTranscript = message.serverContent?.inputTranscription?.text;
-            if (inputTranscript) {
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
+            const inputText = message.serverContent?.inputTranscription?.text;
+            if (inputText) {
+              const arr = transcriptRef.current;
+              const last = arr[arr.length - 1];
               if (last && last.speaker === 'user' && !last.final) {
-                const sep = last.text.endsWith(' ') || inputTranscript.startsWith(' ') ? '' : ' ';
-                transcriptRef.current = [
-                  ...cur.slice(0, -1),
-                  { ...last, text: last.text + sep + inputTranscript }
-                ];
+                last.text += (last.text.endsWith(' ') || inputText.startsWith(' ') ? '' : ' ') + inputText;
               } else {
-                const base = (last && !last.final)
-                  ? [...cur.slice(0, -1), { ...last, final: true }]
-                  : cur;
-                transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
+                if (last && !last.final) last.final = true;
+                arr.push({ speaker: 'user', text: inputText, final: false });
               }
-              flushTranscript(); // debounced — won't block audio
             }
 
             // ── Turn complete ──────────────────────────────────────────────
             if (message.serverContent?.turnComplete) {
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
-              // Finalize any open transcript bubble immediately
-              const cur = transcriptRef.current;
-              if (cur.length && !cur[cur.length - 1].final) {
-                transcriptRef.current = [
-                  ...cur.slice(0, -1),
-                  { ...cur[cur.length - 1], final: true }
-                ];
-              }
-              setTranscript([...transcriptRef.current]); // immediate flush on turn end
+              const arr = transcriptRef.current;
+              const last = arr[arr.length - 1];
+              if (last && !last.final) last.final = true;
             }
           },
 
@@ -786,8 +740,7 @@ Rules:
       turns: [{ role: 'user', parts: [{ text: textInput }] }],
       turnComplete: true,
     });
-    transcriptRef.current = [...transcriptRef.current, { speaker: 'user', text: textInput, final: true }];
-    setTranscript([...transcriptRef.current]);
+    transcriptRef.current.push({ speaker: 'user', text: textInput, final: true });
     setTextInput('');
   };
 
@@ -811,10 +764,11 @@ Rules:
     setVoiceState('processing');
 
     try {
-      // Read from ref (source of truth), NOT React state (may be stale due to debounced flush)
+      // Finalize all entries and flush transcript to React state for the completed view
       const cleanTranscript = transcriptRef.current
         .filter(t => t.text && t.text.trim().length > 0)
         .map(t => ({ ...t, final: true }));
+      setTranscript(cleanTranscript);
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
 
       // Show loader: "Processing Session Recording..."
@@ -946,16 +900,11 @@ Rules:
           <div className="flex-shrink-0 flex items-center justify-center py-12">
             <VoiceVisualizer state={voiceState} size="lg" />
           </div>
-          <div className="flex-1 border-t border-border/50">
-            <ScrollArea className="h-[300px] px-6 py-4">
-              {transcript.map((t, i) => (
-                <div key={i} className={`mb-3 ${t.speaker === 'user' ? 'text-right' : 'text-left'}`}>
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{t.speaker === 'user' ? 'You' : 'Tutor'}</span>
-                  <p className={`text-sm mt-0.5 ${t.speaker === 'user' ? 'text-foreground' : 'text-muted-foreground'}`}>{t.text}</p>
-                </div>
-              ))}
-              <div ref={transcriptEndRef} />
-            </ScrollArea>
+          {/* Transcript is hidden during the live session to keep the
+              audio hot-path completely free of React renders.  It will
+              appear in the completed view once the session ends. */}
+          <div className="flex-1 border-t border-border/50 flex items-center justify-center">
+            <p className="text-xs text-muted-foreground/60 italic">Transcript will be available after the session</p>
           </div>
           <div className="border-t border-border/50 p-4">
             <div className="flex items-center gap-2 mb-3">

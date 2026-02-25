@@ -631,6 +631,10 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                         "proactivity": {"proactive_audio": True},
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
+                        "context_window_compression": {
+                            "sliding_window": {}
+                        },
+                        "session_resumption": {},
                     }
                 },
                 "http_options": {"api_version": "v1alpha"},
