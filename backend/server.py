@@ -627,10 +627,9 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                     "config": {
                         "response_modalities": ["AUDIO"],
                         "system_instruction": system_prompt,
-                        "enable_affective_dialog": True,
-                        "proactivity": {"proactive_audio": True},
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
+                        "thinking_config": {"thinking_budget_tokens": 0},
                         "context_window_compression": {
                             "sliding_window": {}
                         },
