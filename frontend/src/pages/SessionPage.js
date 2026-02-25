@@ -660,8 +660,8 @@ Rules:
       // audio-orb: this.sourceNode = this.inputAudioContext.createMediaStreamSource(this.mediaStream)
       sourceNode.current = inputAudioContext.createMediaStreamSource(mediaStream.current);
 
-      // audio-orb: const bufferSize = 256
-      const bufferSize = 256;
+      // using 512 for ~32ms chunks to optimize base64/JSON websocket overhead
+      const bufferSize = 512;
 
       // audio-orb: this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(bufferSize, 1, 1)
       scriptProcessorNode.current = inputAudioContext.createScriptProcessor(bufferSize, 1, 1);

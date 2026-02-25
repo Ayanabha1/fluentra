@@ -204,7 +204,7 @@ export default function DashboardPage() {
                           </AccordionTrigger>
 
                           <AccordionContent>
-                            <div className="space-y-3 pb-5 pt-2 pl-10">
+                            <div className="space-y-3 pb-5 pt-2">
                               {modSessions.map((sess, si) => {
                                 const isCompleted = sess.status === 'completed';
                                 const isUnlocked = sess.status === 'unlocked';
@@ -215,7 +215,7 @@ export default function DashboardPage() {
                                 return (
                                   <div
                                     key={si}
-                                    className={`p-4 rounded-xl border bg-background transition-all ${isCompleted ? 'border-green-500/20 shadow-sm' :
+                                    className={`p-4 rounded-xl border bg-background transition-all mt-2 ${isCompleted ? 'border-green-500/20 shadow-sm' :
                                       isUnlocked ? 'border-accent/40 shadow-sm ring-1 ring-accent/10' :
                                         'border-border/30 opacity-70'
                                       }`}
@@ -265,7 +265,12 @@ export default function DashboardPage() {
                                             className="flex flex-col items-center gap-1 cursor-pointer hover:bg-muted p-2 rounded-lg transition-colors border border-transparent hover:border-green-500/20"
                                             onClick={() => sess.completed_session_id && navigate(`/session/${sess.completed_session_id}`)}
                                           >
-                                            <CheckCircle2 size={20} className="text-green-500" />
+                                            <div className="flex items-center gap-1.5">
+                                              <CheckCircle2 size={20} className="text-green-500" />
+                                              {sess.score !== undefined && (
+                                                <span className="text-sm font-bold text-green-600" style={{ fontFamily: 'JetBrains Mono' }}>{sess.score}</span>
+                                              )}
+                                            </div>
                                             <span className="text-[10px] text-green-600 font-semibold uppercase tracking-wider">Review</span>
                                           </div>
                                         ) : isLocked ? (

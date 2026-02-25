@@ -369,6 +369,13 @@ Respond ONLY with valid JSON:
 @api_router.get("/learning-plan")
 async def get_learning_plan(user=Depends(get_current_user)):
     plan = await db.learning_plans.find_one({"user_id": user["id"], "is_active": True}, {"_id": 0})
+    if plan:
+        for mod in plan.get("modules", []):
+            for sess in mod.get("sessions", []):
+                if sess.get("status") == "completed" and "score" not in sess and sess.get("completed_session_id"):
+                    s = await db.sessions.find_one({"id": sess["completed_session_id"]}, {"metrics": 1, "_id": 0})
+                    if s and s.get("metrics"):
+                        sess["score"] = s["metrics"].get("overall_score", 0)
     return plan
 
 @api_router.post("/learning-plan/generate")
@@ -633,15 +640,15 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                         #     "sliding_window": {}
                         # },
                         # "session_resumption": {},
-                        # "realtime_input_config": {
-                        #     "automatic_activity_detection": {
-                        #         "disabled": False,
-                        #         "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
-                        #         "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                        #         "prefix_padding_ms": 20,
-                        #         "silence_duration_ms": 100,
-                        #     }
-                        # },
+                        "realtime_input_config": {
+                            "automatic_activity_detection": {
+                                "disabled": False,
+                                "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                                "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
+                                "prefix_padding_ms": 20,
+                                "silence_duration_ms": 150,
+                            }
+                        },
                     }
                 },
                 "http_options": {"api_version": "v1alpha"},
@@ -1002,6 +1009,7 @@ Return ONLY valid JSON with this exact structure:
                         tmpl["status"] = "completed"
                         tmpl["completed_session_id"] = session_id
                         tmpl["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        tmpl["score"] = scores.get("overall_score", 0)
                         completed_mod_i = mi
                         completed_sess_i = si
                         break
