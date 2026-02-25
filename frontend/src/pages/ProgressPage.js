@@ -36,14 +36,14 @@ export default function ProgressPage() {
   const mistakeData = Object.entries(progress?.mistake_types || {}).map(([name, value]) => ({ name: name.replace(/-/g, ' '), value }));
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8" data-testid="progress-page">
-      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-6" data-testid="progress-page">
+      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="mb-6">
         <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight mb-2" style={{ fontFamily: 'Fraunces, serif' }}>Your Progress</h1>
-        <p className="text-muted-foreground mb-8">Track your improvement over time.</p>
+        <p className="text-muted-foreground">Track your improvement over time.</p>
       </motion.div>
 
       {/* Overview Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         {[
           { label: 'CEFR Level', value: user?.cefr_level || '--', sub: `Target: ${user?.target_cefr_level || '--'}`, icon: TrendingUp },
           { label: 'Sessions', value: progress?.total_sessions || 0, sub: `${progress?.current_streak || 0} day streak`, icon: Mic },
@@ -64,7 +64,7 @@ export default function ProgressPage() {
       </div>
 
       {/* CEFR Progress Bar */}
-      <Card className="border-border/50 mb-8" data-testid="cefr-progress-bar">
+      <Card className="border-border/50 mb-6" data-testid="cefr-progress-bar">
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-medium">CEFR Level Progress</span>

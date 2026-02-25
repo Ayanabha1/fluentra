@@ -4,14 +4,14 @@ import { useTheme } from '@/contexts/ThemeContext';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
-import { Sun, Moon, Menu, LayoutDashboard, TrendingUp, BookOpen, Map, Settings, LogOut, User } from 'lucide-react';
+import { Sun, Moon, Menu, LayoutDashboard, TrendingUp, BookOpen, Clock, Settings, LogOut, User } from 'lucide-react';
 import { useState } from 'react';
 
 const navLinks = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/progress', label: 'Progress', icon: TrendingUp },
   { to: '/vocabulary', label: 'Vocabulary', icon: BookOpen },
-  { to: '/plan', label: 'Plan', icon: Map },
+  { to: '/sessions', label: 'Sessions', icon: Clock },
 ];
 
 export default function Layout({ children }) {

@@ -11,9 +11,8 @@ import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
 import { GoogleGenAI } from '@google/genai';
 
-// ─── Audio helpers: EXACT copies from audio-orb/utils.ts ─────────────────────
+// ─── Audio helpers: exact copies from audio-orb/utils.ts ─────────────────────
 
-// audio-orb/utils.ts → encode()
 function encode(bytes) {
   let binary = '';
   const len = bytes.byteLength;
@@ -23,7 +22,6 @@ function encode(bytes) {
   return btoa(binary);
 }
 
-// audio-orb/utils.ts → decode()
 function decode(base64) {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -72,9 +70,6 @@ function decodeAudioData(data, ctx, sampleRate, numChannels) {
   }
   return buffer;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 
 // ─── Completed Session View ───────────────────────────────────────────────────
 function ScoreRing({ value, max = 100, color = '#4ade80', size = 96 }) {
@@ -204,10 +199,8 @@ function CompletedView({ sessionData, transcript, navigate }) {
 
       <div className="max-w-4xl mx-auto px-6 py-6 space-y-4">
 
-        {/* SUMMARY TAB */}
         {activeTab === 'summary' && (
           <div className="space-y-4">
-            {/* Summary card */}
             <div className="rounded-xl border border-border/50 p-5 bg-card">
               <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">Session Summary</h3>
               <p className="text-sm leading-relaxed">{analysis.summary || 'Analysis in progress — refresh in a moment.'}</p>
@@ -219,8 +212,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
                 </div>
               )}
             </div>
-
-            {/* Strengths + Areas side by side */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-xl border border-border/50 p-5 bg-card">
                 <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">✅ Strengths</h3>
@@ -228,8 +219,7 @@ function CompletedView({ sessionData, transcript, navigate }) {
                   {(analysis.strengths || []).length > 0
                     ? analysis.strengths.map((s, i) => (
                       <li key={i} className="flex gap-2 text-sm">
-                        <span className="text-green-500 shrink-0 mt-0.5">✦</span>
-                        <span>{s}</span>
+                        <span className="text-green-500 shrink-0 mt-0.5">✦</span><span>{s}</span>
                       </li>
                     ))
                     : <li className="text-sm text-muted-foreground">Refresh to load strengths.</li>}
@@ -241,16 +231,13 @@ function CompletedView({ sessionData, transcript, navigate }) {
                   {(analysis.areas_for_improvement || []).length > 0
                     ? analysis.areas_for_improvement.map((a, i) => (
                       <li key={i} className="flex gap-2 text-sm">
-                        <span className="text-amber-400 shrink-0 mt-0.5">→</span>
-                        <span>{a}</span>
+                        <span className="text-amber-400 shrink-0 mt-0.5">→</span><span>{a}</span>
                       </li>
                     ))
                     : <li className="text-sm text-muted-foreground">Refresh to load areas.</li>}
                 </ul>
               </div>
             </div>
-
-            {/* Next session focus */}
             {analysis.next_session_focus && (
               <div className="rounded-xl border border-accent/30 bg-accent/5 p-5 flex items-start gap-3">
                 <span className="text-2xl shrink-0">🎯</span>
@@ -260,8 +247,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
                 </div>
               </div>
             )}
-
-            {/* Filler words */}
             {(analysis.filler_words_used || []).length > 0 && (
               <div className="rounded-xl border border-border/50 p-5 bg-card">
                 <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">🗣️ Filler Words Used ({metrics.filler_word_count || 0} times)</h3>
@@ -272,8 +257,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
                 </div>
               </div>
             )}
-
-            {/* New vocabulary */}
             {(analysis.new_words || []).length > 0 && (
               <div className="rounded-xl border border-border/50 p-5 bg-card">
                 <h3 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">📚 Vocabulary from This Session</h3>
@@ -287,7 +270,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
           </div>
         )}
 
-        {/* SKILLS TAB */}
         {activeTab === 'skills' && (
           <div className="space-y-4">
             <div className="rounded-xl border border-border/50 p-5 bg-card">
@@ -299,8 +281,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
                 ))}
               </div>
             </div>
-
-            {/* Score cards grid */}
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {[
                 { label: 'Overall Score', val: score, suffix: '/100', color: scoreColor },
@@ -321,7 +301,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
           </div>
         )}
 
-        {/* CORRECTIONS TAB */}
         {activeTab === 'mistakes' && (
           <div>
             {mistakes.length === 0 ? (
@@ -365,7 +344,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
           </div>
         )}
 
-        {/* HOMEWORK TAB */}
         {activeTab === 'homework' && (
           <div>
             {(analysis.homework || []).length === 0 ? (
@@ -399,7 +377,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
           </div>
         )}
 
-        {/* TRANSCRIPT TAB */}
         {activeTab === 'transcript' && (
           <div className="space-y-3">
             {transcript.length === 0 ? (
@@ -430,8 +407,6 @@ export default function SessionPage() {
   const [status, setStatus] = useState('loading');
   const [voiceState, setVoiceState] = useState('idle');
   const [transcript, setTranscript] = useState([]);
-  // Transcript is accumulated silently during the session (never triggers React renders).
-  // It is flushed to React state ONLY when the session ends, keeping the audio hot-path free.
   const transcriptRef = useRef([]);
 
   const [muted, setMuted] = useState(false);
@@ -440,28 +415,31 @@ export default function SessionPage() {
   const [sessionDuration, setSessionDuration] = useState(30);
   const [customDurationInput, setCustomDurationInput] = useState('');
 
-  // Gemini Live direct session (replaces WebSocket relay)
   const geminiSessionRef = useRef(null);
-  const streamRef = useRef(null);
-  const sourceNodeRef = useRef(null);
-  const scriptProcessorRef = useRef(null);
   const isEndingRef = useRef(false);
   const voiceStateRef = useRef('idle');
   const mutedRef = useRef(false);
 
-  // Audio contexts — created once, matching audio-orb's class fields
-  // audio-orb: private inputAudioContext = new AudioContext({sampleRate: 16000})
-  const inputAudioContextRef = useRef(
+  // ── audio-orb exact fields ────────────────────────────────────────────────────
+  // private inputAudioContext = new AudioContext({sampleRate: 16000})
+  const inputAudioContext = useRef(
     new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
-  );
-  // audio-orb: private outputAudioContext = new AudioContext({sampleRate: 24000})
-  const outputAudioContextRef = useRef(
+  ).current;
+  // private outputAudioContext = new AudioContext({sampleRate: 24000})
+  const outputAudioContext = useRef(
     new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
-  );
-  // audio-orb: private nextStartTime = 0
-  const outputGainRef = useRef(null);
-  const sourcesRef = useRef(new Set());
-  const nextStartTimeRef = useRef(0);
+  ).current;
+  // private nextStartTime = 0  (mutable, not state)
+  const nextStartTime = useRef(0);
+  // private mediaStream, sourceNode, scriptProcessorNode
+  const mediaStream = useRef(null);
+  const sourceNode = useRef(null);
+  const scriptProcessorNode = useRef(null);
+  // private sources = new Set<AudioBufferSourceNode>()
+  const sources = useRef(new Set());
+
+  // outputNode — audio-orb connects this to outputAudioContext.destination
+  const outputNode = useRef(null);
 
   const { user } = useAuth();
   const { theme, toggleTheme } = useTheme();
@@ -469,17 +447,13 @@ export default function SessionPage() {
 
   useEffect(() => { mutedRef.current = muted; }, [muted]);
 
+  // audio-orb: initAudio() + outputNode wiring — runs once on mount
   useEffect(() => {
-    const ctx = outputAudioContextRef.current;
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    outputGainRef.current = gain;
-    nextStartTimeRef.current = ctx.currentTime;
+    const gain = outputAudioContext.createGain();
+    gain.connect(outputAudioContext.destination);
+    outputNode.current = gain;
+    nextStartTime.current = outputAudioContext.currentTime;
   }, []);
-
-  // No real-time transcript flush — transcript is accumulated silently and
-  // shown only after the session ends.  This keeps the onmessage callback
-  // as lightweight as audio-orb (decode → schedule → done).
 
   useEffect(() => {
     if (!sessionId) { setStatus('ready'); return; }
@@ -495,11 +469,7 @@ export default function SessionPage() {
   }, [sessionId]);
 
   const buildSystemPrompt = () => {
-    // Plan sessions have a system_prompt stored in the session doc (written by curriculum AI).
-    // Always prefer this — it's been tailored to the student's level and progress.
     if (sessionData?.system_prompt) return sessionData.system_prompt;
-
-    // Generic fallback for ad-hoc sessions (not from a plan)
     const type = sessionData?.session_type || 'speaking';
     const level = user?.cefr_level || 'B1';
     const nativeLang = user?.native_language || 'their native language';
@@ -513,15 +483,17 @@ Rules:
 - Be warm, natural, and conversational — like a real human coach.
 - Start with a brief friendly greeting and dive straight into practice.
 - Correct grammar mistakes gently inline, then continue naturally.
+- Keep the conversation completely open-ended at all times. ALWAYS ask follow-up questions to keep the student engaged.
+- Do NOT abruptly state that the session or conversation is over.
+- Before closing the session, ask the student if they have any other questions or anything else they want to discuss. End the session ONLY after they confirm they are done.
 - Never output asterisks, markdown, bracketed text, or internal reasoning.
 - Keep responses concise — this is about THEIR speaking practice.`;
   };
 
-  // ─── startSession: 1:1 port of audio-orb/index.tsx ──────────────────────────
+  // ── audio-orb: initSession() ──────────────────────────────────────────────────
   const startSession = async () => {
     setStatus('connecting');
     try {
-      // Create backend session for scoring/transcript storage
       let sid = sessionId;
       if (!sid) {
         const res = await api.post('/sessions', {
@@ -533,96 +505,82 @@ Rules:
         setSessionData(res.data);
       }
 
-      // ── audio-orb: initAudio() ─────────────────────────────────────────
-      const outputCtx = outputAudioContextRef.current;
-      await outputCtx.resume();
-      nextStartTimeRef.current = outputCtx.currentTime;
+      // audio-orb: initAudio()
+      await outputAudioContext.resume();
+      nextStartTime.current = outputAudioContext.currentTime;
 
-      // Get ephemeral token (needed because we can't expose raw API key in browser)
       const tokenRes = await api.post('/sessions/live-token', {
         session_id: sid,
         system_prompt: buildSystemPrompt(),
       });
       const { token, model } = tokenRes.data;
 
-      // ── audio-orb: initClient() ────────────────────────────────────────
       const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: 'v1alpha' } });
 
-      // ── audio-orb: initSession() — the connect call ────────────────────
-      // Deferred open handler (same pattern as before — needed because
-      // session ref isn't assigned until after await resolves)
       let _onOpenCalled = false;
       const _pendingOpen = () => {
         setStatus('active');
         voiceStateRef.current = 'listening';
         setVoiceState('listening');
-        // audio-orb: just starts recording, nothing else.
-        // Do NOT use sendClientContent here — it's a sequential/ordered operation
-        // that blocks sendRealtimeInput audio from being processed until the
-        // greeting response completes, causing 3-5s delay on all subsequent speech.
-        // With proactive_audio: true, the AI can greet on its own.
-        startMicrophone(geminiSessionRef.current);
+        startRecording(geminiSessionRef.current);
       };
 
+      // audio-orb: this.client.live.connect(...)
       const session = await ai.live.connect({
         model: model,
         callbacks: {
-          // ── audio-orb: onopen ────────────────────────────────────────────
+          // audio-orb: onopen
           onopen: () => {
             _onOpenCalled = true;
             if (geminiSessionRef.current) _pendingOpen();
           },
 
-          // ── audio-orb: onmessage — keep as lightweight as possible ──
+          // audio-orb: onmessage — kept as close to the original as possible
           onmessage: (message) => {
-            // ── Audio playback: EXACT copy of audio-orb's onmessage ──
             const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
 
             if (audio) {
-              nextStartTimeRef.current = Math.max(
-                nextStartTimeRef.current,
-                outputCtx.currentTime,
+              nextStartTime.current = Math.max(
+                nextStartTime.current,
+                outputAudioContext.currentTime,
               );
 
               const audioBuffer = decodeAudioData(
                 decode(audio.data),
-                outputCtx,
+                outputAudioContext,
                 24000,
                 1,
               );
-              const source = outputCtx.createBufferSource();
+              const source = outputAudioContext.createBufferSource();
               source.buffer = audioBuffer;
-              source.connect(outputGainRef.current);
+              source.connect(outputNode.current);
               source.addEventListener('ended', () => {
-                sourcesRef.current.delete(source);
+                sources.current.delete(source);
               });
 
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
-              sourcesRef.current.add(source);
+              source.start(nextStartTime.current);
+              nextStartTime.current = nextStartTime.current + audioBuffer.duration;
+              sources.current.add(source);
 
-              // Update visualizer only on transition (not every chunk)
               if (voiceStateRef.current !== 'speaking') {
                 voiceStateRef.current = 'speaking';
                 setVoiceState('speaking');
               }
             }
 
-            // ── Interrupted: EXACT copy of audio-orb ────────────────────────
+            // audio-orb: interrupted
             const interrupted = message.serverContent?.interrupted;
             if (interrupted) {
-              for (const source of sourcesRef.current.values()) {
+              for (const source of sources.current.values()) {
                 source.stop();
-                sourcesRef.current.delete(source);
+                sources.current.delete(source);
               }
-              nextStartTimeRef.current = 0;
+              nextStartTime.current = 0;
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
             }
 
-            // ── Transcription: accumulate silently in mutable array ──
-            // No React state updates, no array spreading — just push.
-            // Transcript is only shown after the session ends.
+            // Transcription (silent accumulation — not in audio-orb, added for Fluentra)
             const outputText = message.serverContent?.outputTranscription?.text;
             if (outputText) {
               const arr = transcriptRef.current;
@@ -647,7 +605,6 @@ Rules:
               }
             }
 
-            // ── Turn complete ──────────────────────────────────────────────
             if (message.serverContent?.turnComplete) {
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
@@ -657,14 +614,14 @@ Rules:
             }
           },
 
-          // ── audio-orb: onerror ───────────────────────────────────────────
+          // audio-orb: onerror
           onerror: (e) => {
             console.error('Gemini error:', e);
             toast.error('Connection error');
             setStatus('ready');
           },
 
-          // ── audio-orb: onclose ───────────────────────────────────────────
+          // audio-orb: onclose
           onclose: (e) => {
             console.log('Gemini closed:', e?.reason);
             if (voiceStateRef.current !== 'idle') {
@@ -673,9 +630,6 @@ Rules:
             }
           },
         },
-        // ── audio-orb: config — ONLY responseModalities ───────────────────
-        // Transcription is already enforced by the ephemeral token constraints.
-        // Do NOT duplicate it here — duplicating can cause conflicts.
         config: {
           responseModalities: ['AUDIO'],
         },
@@ -691,46 +645,61 @@ Rules:
     }
   };
 
-  // ── audio-orb: startRecording() — 1:1 port ─────────────────────────────────
-  const startMicrophone = async (session) => {
-    try {
-      // audio-orb: inputAudioContext.resume()
-      const inputCtx = inputAudioContextRef.current;
-      inputCtx.resume();
+  // ── audio-orb: startRecording() — exact port ──────────────────────────────────
+  const startRecording = async (session) => {
+    // audio-orb: this.inputAudioContext.resume()
+    inputAudioContext.resume();
 
-      // audio-orb: navigator.mediaDevices.getUserMedia({audio: true, video: false})
-      const stream = await navigator.mediaDevices.getUserMedia({
+    try {
+      // audio-orb: navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      mediaStream.current = await navigator.mediaDevices.getUserMedia({
         audio: true,
         video: false,
       });
-      streamRef.current = stream;
 
-      // audio-orb: inputAudioContext.createMediaStreamSource(mediaStream)
-      sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
+      // audio-orb: this.sourceNode = this.inputAudioContext.createMediaStreamSource(this.mediaStream)
+      sourceNode.current = inputAudioContext.createMediaStreamSource(mediaStream.current);
 
-      // audio-orb: bufferSize = 256
+      // audio-orb: const bufferSize = 256
       const bufferSize = 256;
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(bufferSize, 1, 1);
 
-      // audio-orb: scriptProcessorNode.onaudioprocess
-      scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
+      // audio-orb: this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(bufferSize, 1, 1)
+      scriptProcessorNode.current = inputAudioContext.createScriptProcessor(bufferSize, 1, 1);
+
+      // audio-orb: this.scriptProcessorNode.onaudioprocess
+      scriptProcessorNode.current.onaudioprocess = (audioProcessingEvent) => {
         if (mutedRef.current || !session) return;
 
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
 
-        // audio-orb: session.sendRealtimeInput({media: createBlob(pcmData)})
         session.sendRealtimeInput({ media: createBlob(pcmData) });
       };
 
-      // audio-orb: sourceNode.connect(scriptProcessorNode)
-      sourceNodeRef.current.connect(scriptProcessorRef.current);
-      // audio-orb: scriptProcessorNode.connect(inputAudioContext.destination)
-      scriptProcessorRef.current.connect(inputCtx.destination);
+      // audio-orb: this.sourceNode.connect(this.scriptProcessorNode)
+      // audio-orb: this.scriptProcessorNode.connect(this.inputAudioContext.destination)
+      sourceNode.current.connect(scriptProcessorNode.current);
+      scriptProcessorNode.current.connect(inputAudioContext.destination);
+
     } catch (err) {
-      console.error('Mic error:', err);
+      console.error('Error starting recording:', err);
       toast.error('Microphone access required');
       setStatus('ready');
+    }
+  };
+
+  // ── audio-orb: stopRecording() — exact port ───────────────────────────────────
+  const stopRecording = () => {
+    if (scriptProcessorNode.current && sourceNode.current) {
+      scriptProcessorNode.current.disconnect();
+      sourceNode.current.disconnect();
+    }
+    scriptProcessorNode.current = null;
+    sourceNode.current = null;
+
+    if (mediaStream.current) {
+      mediaStream.current.getTracks().forEach((track) => track.stop());
+      mediaStream.current = null;
     }
   };
 
@@ -748,34 +717,35 @@ Rules:
     if (isEndingRef.current) return;
     isEndingRef.current = true;
 
-    // Close Gemini direct connection
+    // audio-orb: session.close()
     if (geminiSessionRef.current) {
       try { geminiSessionRef.current.close(); } catch (_) { }
       geminiSessionRef.current = null;
     }
-    if (scriptProcessorRef.current) scriptProcessorRef.current.disconnect();
-    if (sourceNodeRef.current) sourceNodeRef.current.disconnect();
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    for (const src of sourcesRef.current) { try { src.stop(); } catch (_) { } }
-    sourcesRef.current.clear();
 
-    // Show loader: "Storing session data..."
+    // audio-orb: stopRecording()
+    stopRecording();
+
+    // Stop any playing output
+    for (const src of sources.current) { try { src.stop(); } catch (_) { } }
+    sources.current.clear();
+
     setStatus('saving');
     setVoiceState('processing');
 
     try {
-      // Finalize all entries and flush transcript to React state for the completed view
       const cleanTranscript = transcriptRef.current
         .filter(t => t.text && t.text.trim().length > 0)
         .map(t => ({ ...t, final: true }));
       setTranscript(cleanTranscript);
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
 
-      // Show loader: "Processing Session Recording..."
       setStatus('scoring');
-      await api.post(`/ai/score-session?session_id=${sessionId}`);
+      await api.post('/ai/score-session', {
+        session_id: sessionId,
+        transcript: cleanTranscript,
+      });
 
-      // Fetch the full session from DB
       const fullSession = await api.get(`/sessions/${sessionId}`);
       setSessionData(fullSession.data);
       toast.success('Session completed and scored!');
@@ -900,9 +870,6 @@ Rules:
           <div className="flex-shrink-0 flex items-center justify-center py-12">
             <VoiceVisualizer state={voiceState} size="lg" />
           </div>
-          {/* Transcript is hidden during the live session to keep the
-              audio hot-path completely free of React renders.  It will
-              appear in the completed view once the session ends. */}
           <div className="flex-1 border-t border-border/50 flex items-center justify-center">
             <p className="text-xs text-muted-foreground/60 italic">Transcript will be available after the session</p>
           </div>

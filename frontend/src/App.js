@@ -13,7 +13,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import SessionPage from "@/pages/SessionPage";
 import ProgressPage from "@/pages/ProgressPage";
 import VocabularyPage from "@/pages/VocabularyPage";
-import LearningPlanPage from "@/pages/LearningPlanPage";
+import SessionsPage from "@/pages/SessionsPage";
 import SettingsPage from "@/pages/SettingsPage";
 
 function ProtectedRoute({ children }) {
@@ -64,7 +64,7 @@ function AppRoutes() {
       <Route path="/session/:sessionId?" element={<ProtectedRoute><SessionPage /></ProtectedRoute>} />
       <Route path="/progress" element={<ProtectedRoute><Layout><ProgressPage /></Layout></ProtectedRoute>} />
       <Route path="/vocabulary" element={<ProtectedRoute><Layout><VocabularyPage /></Layout></ProtectedRoute>} />
-      <Route path="/plan" element={<ProtectedRoute><Layout><LearningPlanPage /></Layout></ProtectedRoute>} />
+      <Route path="/sessions" element={<ProtectedRoute><Layout><SessionsPage /></Layout></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Layout><SettingsPage /></Layout></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" />} />
     </Routes>

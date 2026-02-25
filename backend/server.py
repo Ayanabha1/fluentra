@@ -394,8 +394,8 @@ For EVERY session, write a "system_prompt" field. This is the FULL instruction g
 2. Specify the EXACT topic and activity for the 10 minutes
 3. List 2-3 specific phrases, structures, or vocabulary to introduce
 4. Describe how to correct errors for a {current_level} student (gently, inline)
-5. End instruction: "Close the session by summarizing what was practiced in one sentence."
-
+5. Rule: Keep the conversation completely open-ended at all times by asking follow-up questions to keep the user engaged. Do NOT abruptly end the conversation.
+6. End instruction: "Before closing the session, always ask the student if they have any other questions or anything else they want to practice. ONLY close the session after they confirm they have nothing else."
 Difficulty progression:
 - Week 1: Very easy, welcoming, short sentences, present tense only
 - Week 2: Slightly harder, introduce past tense, more vocabulary
@@ -417,7 +417,7 @@ Respond ONLY with valid JSON matching this EXACT structure:
           "title": "Introducing Yourself",
           "description": "Practice introducing yourself with name, job, and where you live",
           "duration_minutes": 10,
-          "system_prompt": "You are Fluentra, a warm English coach. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by asking their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Ask 3-4 simple follow-up questions. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
+          "system_prompt": "You are Fluentra, a warm English coach. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by asking their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Ask 3-4 simple follow-up questions. Always keep the conversation open-ended. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, ask if they have any other questions or anything else to practice. If they say no, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
         }}
       ]
     }}
@@ -451,9 +451,8 @@ Respond ONLY with valid JSON matching this EXACT structure:
                     "system_prompt": (
                         "You are Fluentra, a warm English coach. This is Week " + str(w+1) + ", Session " + str(s+1) + ". "
                         "Conduct a 10-minute speaking session for a " + current_level + " student. "
-                        + opening + " "
-                        "Focus on natural conversation. Correct errors gently by repeating the correct form naturally. "
-                        "End with: Great session! Today you practiced speaking in English."
+                        "Focus on natural conversation. Always keep the conversation open-ended and ask follow-up questions. Correct errors gently by repeating the correct form naturally. "
+                        "Before ending, ask if they have any other questions or want to practice anything else. Once they say no, end with: Great session! Today you practiced speaking in English."
                     )
                 })
             fallback_modules.append({
@@ -629,11 +628,20 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                         "system_instruction": system_prompt,
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
-                        "thinking_config": {"thinking_budget_tokens": 0},
-                        "context_window_compression": {
-                            "sliding_window": {}
-                        },
-                        "session_resumption": {},
+                        # "thinking_config": {"thinking_budget": 0},
+                        # "context_window_compression": {
+                        #     "sliding_window": {}
+                        # },
+                        # "session_resumption": {},
+                        # "realtime_input_config": {
+                        #     "automatic_activity_detection": {
+                        #         "disabled": False,
+                        #         "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                        #         "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
+                        #         "prefix_padding_ms": 20,
+                        #         "silence_duration_ms": 100,
+                        #     }
+                        # },
                     }
                 },
                 "http_options": {"api_version": "v1alpha"},
@@ -794,9 +802,14 @@ async def websocket_session(websocket: WebSocket):
             pass
 
 # ==================== AI Session Scoring ====================
+class ScoreSessionInput(BaseModel):
+    session_id: str
+    transcript: list = []
+
 @api_router.post("/ai/score-session")
-async def score_session_ai(session_id: str, user=Depends(get_current_user)):
+async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_user)):
     import re
+    session_id = input.session_id
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -806,7 +819,8 @@ async def score_session_ai(session_id: str, user=Depends(get_current_user)):
         logger.info(f"Session {session_id} already scored, returning cached result")
         return {"metrics": s.get("metrics", {}), "analysis": s.get("analysis", {})}
 
-    transcript = s.get("transcript", [])
+    # Use transcript from payload to avoid race condition with /complete write
+    transcript = input.transcript if input.transcript else s.get("transcript", [])
     cefr = user.get("cefr_level", "B1")
     session_type = s.get("session_type", "speaking")
 
@@ -1040,7 +1054,8 @@ REWRITE RULES:
 - If score 50-75: build on strengths, gently address weak areas mid-session
 - If score > 75: add slightly more complexity, introduce new vocabulary
 - The tutor must naturally slip in correction of top mistakes without making it feel like drilling
-- Keep it a 10-minute voice session — warm, conversational, progressive
+- Keep the conversation open-ended at all times, making sure to ask follow-up questions.
+- Before ending the session, ALWAYS ask the student if they have any other questions or anything else they want to practice. ONLY close the session after they confirm they do not.
 - Start with acknowledging progress from last session
 
 Respond ONLY with the new system_prompt string (no JSON wrapper, just the plain text instruction)."""

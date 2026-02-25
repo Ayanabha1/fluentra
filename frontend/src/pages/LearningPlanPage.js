@@ -100,10 +100,10 @@ export default function LearningPlanPage() {
   ).length || 0;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8" data-testid="learning-plan-page">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-6" data-testid="learning-plan-page">
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight" style={{ fontFamily: 'Fraunces, serif' }}>
             Learning Plan
@@ -119,7 +119,7 @@ export default function LearningPlanPage() {
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <Card className="border-border/50">
           <CardContent className="p-5">
             <div className="flex items-center gap-2 mb-2">
@@ -179,8 +179,8 @@ export default function LearningPlanPage() {
                   key={mi}
                   value={`module-${mi}`}
                   className={`border rounded-xl px-4 transition-colors ${modCompleted ? 'border-green-500/30 bg-green-500/5' :
-                      modActive ? 'border-accent/50 bg-accent/5' :
-                        'border-border/50'
+                    modActive ? 'border-accent/50 bg-accent/5' :
+                      'border-border/50'
                     }`}
                   data-testid={`module-${mi}`}
                 >
@@ -221,8 +221,8 @@ export default function LearningPlanPage() {
                           <div
                             key={si}
                             className={`p-4 rounded-xl border transition-all ${isCompleted ? 'border-green-500/20 bg-green-500/5' :
-                                isUnlocked ? 'border-accent/40 bg-accent/5 shadow-sm' :
-                                  'border-border/30 bg-muted/20 opacity-60'
+                              isUnlocked ? 'border-accent/40 bg-accent/5 shadow-sm' :
+                                'border-border/30 bg-muted/20 opacity-60'
                               }`}
                             data-testid={`session-${mi}-${si}`}
                           >
@@ -267,9 +267,12 @@ export default function LearningPlanPage() {
                               {/* Status / action button */}
                               <div className="shrink-0 pt-0.5 flex flex-col items-center gap-1">
                                 {isCompleted ? (
-                                  <div className="flex flex-col items-center gap-1">
+                                  <div
+                                    className="flex flex-col items-center gap-1 cursor-pointer hover:bg-muted/50 p-2 rounded-lg transition-colors border border-transparent hover:border-green-500/20"
+                                    onClick={() => sess.completed_session_id && (window.location.href = `/session/${sess.completed_session_id}`)}
+                                  >
                                     <CheckCircle2 size={22} className="text-green-500" />
-                                    <span className="text-[10px] text-green-500 font-semibold uppercase">Done</span>
+                                    <span className="text-[10px] text-green-500 font-semibold uppercase">View</span>
                                   </div>
                                 ) : isLocked ? (
                                   <div className="flex flex-col items-center gap-1 text-muted-foreground/40">
