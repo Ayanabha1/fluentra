@@ -664,145 +664,238 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
 # ==================== Gemini Live WebSocket (DEPRECATED — kept as fallback) ====================
 @app.websocket("/api/ws/session")
 async def websocket_session(websocket: WebSocket):
+    # This remains for fallback
     await websocket.accept()
-    logger.info("WebSocket connection established")
-    user_id = None
+    await websocket.close()
+
+# ==================== Real-time Voice Agent App ====================
+
+LANGUAGE_MAP = {
+    "en-US": "English (US)",
+    "en-IN": "English (India)",
+    "hi-IN": "Hindi",
+    "fr-FR": "French",
+    "de-DE": "German",
+    "es-US": "Spanish",
+    "ja-JP": "Japanese",
+    "ko-KR": "Korean",
+    "pt-BR": "Portuguese (Brazil)",
+    "ar-EG": "Arabic (Egypt)"
+}
+
+async def generate_session_report(session_id: str, transcripts: list):
     try:
-        # First message is always JSON init
-        init_data = await websocket.receive_json()
-        system_prompt = init_data.get("system_prompt", "You are Fluentra, a friendly English tutor.")
-        session_id = init_data.get("session_id", "")
+        transcript_text = "\n".join([f"{t['speaker'].upper()}: {t['text']}" for t in transcripts])
+        prompt = f"""Analyze this voice session transcript and provide a detailed report.
+TRANSCRIPT:
+{transcript_text}
 
-        if session_id:
-            s_doc = await db.sessions.find_one({"id": session_id})
-            if s_doc:
-                user_id = s_doc.get("user_id")
-
-        if user_id:
-            try:
-                last_session = await db.sessions.find_one(
-                    {"user_id": user_id, "status": "completed", "analysis.summary": {"$exists": True}},
-                    {"_id": 0}, sort=[("started_at", -1)]
-                )
-                if last_session and last_session.get("analysis") and last_session["analysis"].get("summary"):
-                    summary = last_session["analysis"]["summary"]
-                    system_prompt += f"\n\nPrevious session recap:\n{summary}"
-            except Exception as e:
-                logger.error(f"Failed to fetch previous session summary: {e}")
-
-        logger.info(f"Starting Gemini Live session for: {session_id}")
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            system_instruction=types.Content(parts=[types.Part(text=system_prompt)]),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
+Respond with strictly valid JSON matching this schema:
+{{
+  "score": 85,
+  "executive_summary": "Overall good session...",
+  "strengths": ["Clear pronunciation"],
+  "weaknesses": ["Grammar errors in past tense"],
+  "suggestions": ["Practice past tense"],
+  "communication_style": "Friendly and clear",
+  "engagement_metrics": {{"talk_time_percentage": 45}},
+  "key_takeaways": ["Needs work on verb forms"],
+  "transcript_highlights": ["User: ..."]
+}}"""
+        response = await get_gemini_client().aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        report = json.loads(response.text)
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"report": report, "transcripts": transcripts, "status": "completed"}}
+        )
+    except Exception as e:
+        logger.error(f"Report generation error: {e}")
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"status": "completed", "transcripts": transcripts}}
         )
 
+@app.websocket("/api/ws/voice-agent/")
+async def websocket_voice_agent(
+    websocket: WebSocket,
+    prompt: str = "",
+    agent_id: str = "default",
+    voice: str = "Aoede",
+    language: str = "en-US",
+    token: str = ""
+):
+    await websocket.accept()
+    logger.info("Voice connection established")
+    
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+        if not user:
+            await websocket.close(code=1008)
+            return
+    except Exception as e:
+        logger.error(f"WS auth error: {e}")
+        await websocket.close(code=1008)
+        return
+
+    lang_name = LANGUAGE_MAP.get(language, "English")
+    if language and not language.startswith("en-"):
+        prompt += f"\n\nIMPORTANT: You must speak and respond in {lang_name}."
+
+    session_id = str(uuid.uuid4())
+    
+    session_doc = {
+        "id": session_id,
+        "user_id": user["id"],
+        "agent_id": agent_id,
+        "language": language,
+        "transcripts": [],
+        "report": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "ended_at": None,
+        "session_type": "speaking",
+        "status": "active",
+        "system_prompt": prompt
+    }
+    await db.sessions.insert_one(session_doc)
+    
+    await websocket.send_json({"type": "session_created", "sessionId": session_id})
+
+    config = types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        system_instruction=types.Content(parts=[types.Part(text=prompt)]),
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=voice
+                )
+            )
+        ),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+    )
+
+    done_event = asyncio.Event()
+    session_transcripts = []
+    ai_text_fragments = []
+    user_text_fragments = []
+
+    try:
         async with get_gemini_live_client().aio.live.connect(
             model=LIVE_MODEL,
             config=config
         ) as gemini_session:
-            await websocket.send_json({"type": "connected"})
-            logger.info("Gemini Live session connected")
-
-            done_event = asyncio.Event()
-
-            async def receive_from_client():
-                try:
-                    while not done_event.is_set():
-                        # FIX: receive raw bytes OR text — audio takes the fast binary path
-                        message = await websocket.receive()
-                        if message.get("bytes") is not None:
-                            # RAW BINARY PATH: Int16 PCM bytes sent directly, zero JSON/base64 overhead
-                            await gemini_session.send_realtime_input(
-                                audio=types.Blob(data=message["bytes"], mime_type="audio/pcm;rate=16000")
-                            )
-                        elif message.get("text") is not None:
-                            msg = json.loads(message["text"])
-                            if msg.get("type") == "text":
-                                await gemini_session.send_client_content(
-                                    turns=types.Content(parts=[types.Part(text=msg["data"])]),
-                                    turn_complete=True
-                                )
-                            elif msg.get("type") == "end":
-                                done_event.set()
-                                return
-                except WebSocketDisconnect:
-                    logger.info("Client disconnected")
-                    done_event.set()
-                except Exception as e:
-                    logger.error(f"Client receive error: {e}")
-                    done_event.set()
-
-            async def send_to_client():
+            
+            async def receive_from_gemini():
+                nonlocal ai_text_fragments, user_text_fragments
                 try:
                     while not done_event.is_set():
                         turn = gemini_session.receive()
                         async for response in turn:
                             if done_event.is_set():
                                 return
-                            try:
-                                sc = response.server_content
-                                if sc is None:
-                                    continue
+                            sc = response.server_content
+                            if sc is None:
+                                continue
 
-                                if sc.model_turn and sc.model_turn.parts:
-                                    for part in sc.model_turn.parts:
-                                        if part.inline_data and part.inline_data.data:
-                                            # FIX: Send audio as RAW BINARY frame — eliminates base64
-                                            # encode on backend AND decode on frontend
-                                            await websocket.send_bytes(part.inline_data.data)
-                                        if part.text:
-                                            await websocket.send_json({
-                                                "type": "transcript",
-                                                "data": part.text,
-                                                "speaker": "ai"
-                                            })
+                            if sc.model_turn and sc.model_turn.parts:
+                                for part in sc.model_turn.parts:
+                                    if part.inline_data and part.inline_data.data:
+                                        b64_audio = base64.b64encode(part.inline_data.data).decode('utf-8')
+                                        await websocket.send_json({"type": "audio", "data": b64_audio})
 
-                                if hasattr(sc, 'output_transcription') and sc.output_transcription:
-                                    text = getattr(sc.output_transcription, 'text', '')
-                                    if text:
-                                        await websocket.send_json({"type": "transcript", "data": text, "speaker": "ai"})
+                            if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                                text = getattr(sc.output_transcription, 'text', '')
+                                if text:
+                                    ai_text_fragments.append(text)
+                                    await websocket.send_json({"type": "text", "data": text, "isPartial": True})
+                            
+                            if hasattr(sc, 'input_transcription') and sc.input_transcription:
+                                text = getattr(sc.input_transcription, 'text', '')
+                                if text:
+                                    user_text_fragments.append(text)
+                                    await websocket.send_json({"type": "transcription", "role": "user", "text": text, "isPartial": True})
 
-                                if hasattr(sc, 'input_transcription') and sc.input_transcription:
-                                    text = getattr(sc.input_transcription, 'text', '')
-                                    if text:
-                                        await websocket.send_json({"type": "transcript", "data": text, "speaker": "user"})
-
-                                if getattr(sc, 'interrupted', False):
-                                    await websocket.send_json({"type": "interrupted"})
-
-                                if sc.turn_complete:
-                                    await websocket.send_json({"type": "turn_complete"})
-                                    break
-
-                            except WebSocketDisconnect:
-                                done_event.set()
-                                return
-                            except Exception as inner_e:
-                                err_str = str(inner_e)
-                                if "1005" not in err_str and "1000" not in err_str:
-                                    logger.error(f"Response processing error: {inner_e}")
-                                done_event.set()
-                                return
-
+                            if sc.turn_complete:
+                                if ai_text_fragments:
+                                    final_ai_text = " ".join(ai_text_fragments).strip()
+                                    session_transcripts.append({"speaker": "ai", "text": final_ai_text})
+                                    ai_text_fragments = []
+                                    await websocket.send_json({"type": "text_complete"})
+                                if user_text_fragments:
+                                    final_user_text = " ".join(user_text_fragments).strip()
+                                    session_transcripts.append({"speaker": "user", "text": final_user_text})
+                                    user_text_fragments = []
+                                    await websocket.send_json({"type": "transcription_complete"})
+                except asyncio.CancelledError:
+                    pass
                 except Exception as e:
-                    if not done_event.is_set():
-                        logger.error(f"Gemini receive error: {e}")
+                    logger.error(f"Gemini receive error: {e}")
+                finally:
                     done_event.set()
 
-            await asyncio.gather(receive_from_client(), send_to_client(), return_exceptions=True)
+            async def receive_from_client():
+                try:
+                    while not done_event.is_set():
+                        message = await websocket.receive_text()
+                        data = json.loads(message)
+                        if data.get("type") == "audio" and data.get("data"):
+                            audio_bytes = base64.b64decode(data["data"])
+                            await gemini_session.send_realtime_input(
+                                audio=types.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
+                            )
+                        elif data.get("type") == "end":
+                            done_event.set()
+                            break
+                        elif data.get("type") == "text":
+                            await gemini_session.send_client_content(
+                                turns=types.Content(parts=[types.Part(text=data["text"])]),
+                                turn_complete=True
+                            )
+                except asyncio.CancelledError:
+                    pass
+                except WebSocketDisconnect:
+                    logger.info("Client disconnected")
+                except Exception as e:
+                    logger.error(f"Client receive error: {e}")
+                finally:
+                    done_event.set()
 
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+            task_client = asyncio.create_task(receive_from_client())
+            task_gemini = asyncio.create_task(receive_from_gemini())
+            
+            done, pending = await asyncio.wait(
+                [task_client, task_gemini],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        try:
-            await websocket.send_json({"type": "error", "message": str(e)})
-        except:
-            pass
+        logger.error(f"Session connect error: {e}")
     finally:
+        now = datetime.now(timezone.utc).isoformat()
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"ended_at": now, "status": "generating_report", "duration_minutes": 30}}
+        )
+        if session_transcripts:
+            asyncio.create_task(generate_session_report(session_id, session_transcripts))
+        else:
+            await db.sessions.update_one(
+                {"id": session_id},
+                {"$set": {"status": "completed"}}
+            )
+            
         try:
             await websocket.close()
         except:
