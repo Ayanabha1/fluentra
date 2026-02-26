@@ -360,7 +360,11 @@ Respond ONLY with valid JSON:
         scores = {"fluency_score": 5, "grammar_score": 5, "vocabulary_score": 5, "confidence_score": 5, "weighted_score": 50, "cefr_level": "B1", "strengths": ["Good communication willingness", "Engaged in conversation"], "areas_to_improve": ["Grammar accuracy", "Vocabulary range"], "detailed_feedback": "Assessment completed. Let's work together to improve your English!"}
 
     cefr = scores.get("cefr_level", "B1")
-    await db.sessions.update_one({"id": session_id}, {"$set": {"metrics.grammar_accuracy": scores.get("grammar_score", 0) * 10, "metrics.overall_score": scores.get("weighted_score", 0), "assessment_scores": scores}})
+    await db.sessions.update_one({"id": session_id}, {"$set": {
+        "metrics.grammar_accuracy": scores.get("grammar_score", 0),
+        "metrics.overall_score": scores.get("weighted_score", 0),
+        "assessment_scores": scores,
+    }})
     await db.users.update_one({"id": user["id"]}, {"$set": {"cefr_level": cefr, "assessment_completed": True, "assessment_completed_at": datetime.now(timezone.utc).isoformat()}})
     await db.memories.insert_one({"user_id": user["id"], "type": "assessment", "content": f"Initial assessment: CEFR {cefr}. Strengths: {', '.join(scores.get('strengths', []))}. Improve: {', '.join(scores.get('areas_to_improve', []))}.", "created_at": datetime.now(timezone.utc).isoformat()})
     return scores
@@ -633,23 +637,15 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                     "config": {
                         "response_modalities": ["AUDIO"],
                         "system_instruction": system_prompt,
+                        "proactivity":{'proactive_audio': True},
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
                         "thinking_config": {"thinking_budget": 0},
-                        # "thinking_config": {"thinking_budget": 0},
-                        # "context_window_compression": {
-                        #     "sliding_window": {}
-                        # },
-                        # "session_resumption": {},
-                        "realtime_input_config": {
-                            "automatic_activity_detection": {
-                                "disabled": False,
-                                "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
-                                "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                                "prefix_padding_ms": 20,
-                                "silence_duration_ms": 300,
-                            }
+                        "context_window_compression": {
+                            "sliding_window": {}
                         },
+                        "realtime_input_config": {
+                    },
                     }
                 },
                 "http_options": {"api_version": "v1alpha"},
