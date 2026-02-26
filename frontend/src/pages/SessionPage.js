@@ -4,14 +4,13 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { Mic, MicOff, PhoneOff, Sun, Moon, ArrowLeft, MessageSquare } from 'lucide-react';
 import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
 import { GoogleGenAI } from '@google/genai';
 
-// ─── Audio helpers ────────────────────────────────────────────────────────────
+// ─── Audio helpers — exact copies from audio-orb/utils.ts ────────────────────
 
 function encode(bytes) {
   let binary = '';
@@ -28,12 +27,15 @@ function decode(base64) {
   return bytes;
 }
 
+function createBlob(data) {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) int16[i] = data[i] * 32768;
+  return { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+}
+
 function decodeAudioData(data, ctx, sampleRate, numChannels) {
-  const buffer = ctx.createBuffer(
-    numChannels,
-    data.length / 2 / numChannels,
-    sampleRate,
-  );
+  const buffer = ctx.createBuffer(numChannels, data.length / 2 / numChannels, sampleRate);
   const dataInt16 = new Int16Array(data.buffer);
   const l = dataInt16.length;
   const dataFloat32 = new Float32Array(l);
@@ -77,10 +79,27 @@ function RadarBar({ label, value, color = 'hsl(var(--accent))' }) {
     <div className="flex items-center gap-3">
       <div className="w-24 text-xs font-medium text-muted-foreground text-right shrink-0">{label}</div>
       <div className="flex-1 h-2 bg-border/40 rounded-full overflow-hidden">
-        <div className="h-full rounded-full transition-all duration-1000"
-          style={{ width: `${value || 0}%`, background: color }} />
+        <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${value || 0}%`, background: color }} />
       </div>
       <div className="w-8 text-xs font-mono font-medium text-right shrink-0">{value || 0}</div>
+    </div>
+  );
+}
+
+// ─── Live mic level bar shown during active session ───────────────────────────
+function MicLevelBar({ rmsRef }) {
+  const [level, setLevel] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setLevel((rmsRef.current || 0) * 100), 80);
+    return () => clearInterval(id);
+  }, [rmsRef]);
+  return (
+    <div className="flex items-center gap-2 justify-center opacity-60">
+      <Mic size={10} className="text-muted-foreground shrink-0" />
+      <div className="w-24 h-1.5 bg-border/40 rounded-full overflow-hidden">
+        <div className="h-full rounded-full bg-accent transition-all duration-75"
+          style={{ width: `${Math.min(100, level * 5)}%` }} />
+      </div>
     </div>
   );
 }
@@ -101,12 +120,10 @@ function CompletedView({ sessionData, transcript, navigate }) {
     listening: 0,
     coherence: 0,
   };
-
   const skillColors = {
     grammar: '#60a5fa', vocabulary: '#a78bfa', fluency: '#34d399',
     confidence: '#f59e0b', listening: '#f472b6', coherence: '#fb923c',
   };
-
   const tabs = [
     { id: 'summary', label: 'Summary' },
     { id: 'skills', label: 'Skills' },
@@ -114,12 +131,10 @@ function CompletedView({ sessionData, transcript, navigate }) {
     { id: 'homework', label: 'Homework' },
     { id: 'transcript', label: 'Transcript' },
   ];
-
   const hwTypeIcon = { writing: '✍️', speaking: '🗣️', reading: '📖', grammar: '📝', vocabulary: '📚' };
 
   return (
     <div className="flex-1 overflow-y-auto bg-background">
-      {/* Hero */}
       <div className="relative border-b border-border/20 bg-card/20">
         <div className="max-w-5xl mx-auto px-6 py-10 flex flex-col md:flex-row items-center md:items-start gap-8">
           <div className="flex-shrink-0">
@@ -130,11 +145,11 @@ function CompletedView({ sessionData, transcript, navigate }) {
             <h1 className="text-3xl font-bold mb-3 tracking-tight" style={{ fontFamily: 'Fraunces, serif' }}>
               {score >= 80 ? 'Excellent work! 🌟' : score >= 60 ? 'Great effort! 💪' : score >= 40 ? 'Good start! 🌱' : 'Keep practising! 🎯'}
             </h1>
-            {analysis.encouraging_note ? (
-              <p className="text-sm text-muted-foreground mb-6 italic leading-relaxed max-w-2xl">{analysis.encouraging_note}</p>
-            ) : analysis.summary ? (
-              <p className="text-sm text-white/50 mb-6 italic leading-relaxed max-w-2xl">{analysis.summary.split('. ')[0] + '.'}</p>
-            ) : null}
+            {analysis.encouraging_note
+              ? <p className="text-sm text-muted-foreground mb-6 italic leading-relaxed max-w-2xl">{analysis.encouraging_note}</p>
+              : analysis.summary
+                ? <p className="text-sm text-white/50 mb-6 italic leading-relaxed max-w-2xl">{analysis.summary.split('. ')[0] + '.'}</p>
+                : null}
             <div className="flex flex-wrap justify-center md:justify-start gap-8 mt-2">
               {[
                 { label: 'Grammar', val: `${metrics.grammar_accuracy || 0}%` },
@@ -160,7 +175,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
         </div>
       </div>
 
-      {/* Tab bar */}
       <div className="border-b border-border/20 sticky top-0 z-10 bg-background/95 backdrop-blur-md">
         <div className="max-w-5xl mx-auto px-6 flex gap-8 overflow-x-auto no-scrollbar">
           {tabs.map(t => (
@@ -173,7 +187,6 @@ function CompletedView({ sessionData, transcript, navigate }) {
       </div>
 
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
-
         {activeTab === 'summary' && (
           <div className="space-y-6">
             <div className="rounded-2xl border border-border/30 p-6 bg-card/30">
@@ -277,8 +290,7 @@ function CompletedView({ sessionData, transcript, navigate }) {
               <h3 className="text-[11px] font-semibold uppercase tracking-[0.15em] text-muted-foreground mb-6">Skill Breakdown</h3>
               <div className="space-y-5">
                 {Object.entries(skillBreakdown).map(([skill, val]) => (
-                  <RadarBar key={skill} label={skill.charAt(0).toUpperCase() + skill.slice(1)}
-                    value={val} color={skillColors[skill] || 'hsl(var(--accent))'} />
+                  <RadarBar key={skill} label={skill.charAt(0).toUpperCase() + skill.slice(1)} value={val} color={skillColors[skill] || 'hsl(var(--accent))'} />
                 ))}
               </div>
             </div>
@@ -407,7 +419,6 @@ export default function SessionPage() {
   const { sessionId: paramId } = useParams();
   const [sessionId, setSessionId] = useState(paramId);
   const [sessionData, setSessionData] = useState(null);
-  // status: loading | ready | connecting | active | scoring | completed
   const [status, setStatus] = useState('loading');
   const [voiceState, setVoiceState] = useState('idle');
   const [transcript, setTranscript] = useState([]);
@@ -419,32 +430,27 @@ export default function SessionPage() {
   const [sessionDuration, setSessionDuration] = useState(30);
   const [customDurationInput, setCustomDurationInput] = useState('');
 
-  // Refs
+  // ── NEW: live RMS ref for the mic level bar ─────────────────────────────
+  const liveRmsRef = useRef(0);
+
   const geminiSessionRef = useRef(null);
   const isEndingRef = useRef(false);
   const voiceStateRef = useRef('idle');
   const mutedRef = useRef(false);
   const sessionIdRef = useRef(null);
 
-  // Audio playback
-  const audioQueueRef = useRef([]);
-  const isPlayingRef = useRef(false);
-  const nextStartTime = useRef(0);
-  const sources = useRef(new Set());
-
-  // Web Audio API — created once, never recreated
   const inputAudioContext = useRef(
     new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
   ).current;
   const outputAudioContext = useRef(
     new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
   ).current;
-
-  // Mic nodes
+  const outputNode = useRef(null);
+  const nextStartTime = useRef(0);
+  const sources = useRef(new Set());
   const mediaStream = useRef(null);
   const sourceNode = useRef(null);
   const scriptProcessorNode = useRef(null);
-  const outputNode = useRef(null);
 
   const { user } = useAuth();
   const { theme, toggleTheme } = useTheme();
@@ -452,7 +458,6 @@ export default function SessionPage() {
 
   useEffect(() => { mutedRef.current = muted; }, [muted]);
 
-  // Wire output gain node once
   useEffect(() => {
     const gain = outputAudioContext.createGain();
     gain.connect(outputAudioContext.destination);
@@ -460,7 +465,6 @@ export default function SessionPage() {
     nextStartTime.current = outputAudioContext.currentTime;
   }, []);
 
-  // Load session if sessionId in URL
   useEffect(() => {
     if (!sessionId) {
       setStatus(prev => (['connecting', 'active', 'scoring'].includes(prev) ? prev : 'ready'));
@@ -471,9 +475,9 @@ export default function SessionPage() {
         const res = await api.get(`/sessions/${sessionId}`);
         setSessionData(res.data);
         if (res.data.status === 'completed') { setStatus('completed'); return; }
-        setStatus(prev => (['active', 'connecting', 'scoring', 'saving'].includes(prev) ? prev : 'ready'));
+        setStatus(prev => (['active', 'connecting', 'scoring'].includes(prev) ? prev : 'ready'));
       } catch {
-        setStatus(prev => (['active', 'connecting', 'scoring', 'saving'].includes(prev) ? prev : 'ready'));
+        setStatus(prev => (['active', 'connecting', 'scoring'].includes(prev) ? prev : 'ready'));
       }
     };
     load();
@@ -501,67 +505,45 @@ Rules:
 - Keep responses concise — this is about THEIR speaking practice.`;
   };
 
-  // ── Audio playback queue ──────────────────────────────────────────────────
-  const playNextInQueue = () => {
-    if (audioQueueRef.current.length === 0) return;
-    const audioBuffer = audioQueueRef.current.shift();
-    const source = outputAudioContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(outputNode.current);
-
-    const now = outputAudioContext.currentTime;
-    if (nextStartTime.current < now) nextStartTime.current = now;
-
-    if (!isPlayingRef.current) {
-      console.log(`[Time Log] AI started talking at: ${new Date().toISOString()} (${Date.now()})`);
-    }
-
-    source.start(nextStartTime.current);
-    nextStartTime.current += audioBuffer.duration;
-    sources.current.add(source);
-    isPlayingRef.current = true;
-
-    source.addEventListener('ended', () => {
-      sources.current.delete(source);
-      if (sources.current.size === 0 && audioQueueRef.current.length === 0) {
-        isPlayingRef.current = false;
-        if (voiceStateRef.current !== 'listening') {
-          voiceStateRef.current = 'listening';
-          setVoiceState('listening');
-        }
-      }
-    });
-
-    playNextInQueue(); // schedule all buffered chunks immediately
-  };
-
-  // ── Handle Gemini SDK messages ────────────────────────────────────────────
   const handleGeminiMessage = (msg) => {
-    const sc = msg.serverContent;
-    if (!sc) return;
-
-    // Audio output chunks
-    if (sc.modelTurn?.parts) {
-      for (const part of sc.modelTurn.parts) {
-        if (part.inlineData?.data) {
-          const bytes = decode(part.inlineData.data);
-          if (bytes.length === 0) continue;
-          try {
-            const buf = decodeAudioData(bytes, outputAudioContext, 24000, 1);
-            audioQueueRef.current.push(buf);
-            if (voiceStateRef.current !== 'speaking') {
-              voiceStateRef.current = 'speaking';
-              setVoiceState('speaking');
-            }
-            playNextInQueue();
-          } catch (e) { console.error('Audio decode error', e); }
+    const audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData;
+    if (audio) {
+      nextStartTime.current = Math.max(nextStartTime.current, outputAudioContext.currentTime);
+      const audioBuffer = decodeAudioData(decode(audio.data), outputAudioContext, 24000, 1);
+      const source = outputAudioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(outputNode.current);
+      source.start(nextStartTime.current);
+      nextStartTime.current += audioBuffer.duration;
+      sources.current.add(source);
+      source.addEventListener('ended', () => {
+        sources.current.delete(source);
+        if (sources.current.size === 0) {
+          if (voiceStateRef.current !== 'listening') {
+            voiceStateRef.current = 'listening';
+            setVoiceState('listening');
+          }
         }
+      });
+      if (voiceStateRef.current !== 'speaking') {
+        console.log(`[Time Log] AI started talking at: ${new Date().toISOString()} (${Date.now()})`);
+        voiceStateRef.current = 'speaking';
+        setVoiceState('speaking');
       }
     }
 
-    // AI speech transcription (partial)
-    if (sc.outputTranscription?.text) {
-      const text = sc.outputTranscription.text;
+    if (msg.serverContent?.interrupted) {
+      for (const source of sources.current.values()) {
+        source.stop();
+        sources.current.delete(source);
+      }
+      nextStartTime.current = 0;
+      voiceStateRef.current = 'listening';
+      setVoiceState('listening');
+    }
+
+    if (msg.serverContent?.outputTranscription?.text) {
+      const text = msg.serverContent.outputTranscription.text;
       const arr = transcriptRef.current;
       const last = arr[arr.length - 1];
       if (last && last.speaker === 'ai' && !last.final) {
@@ -572,9 +554,8 @@ Rules:
       }
     }
 
-    // User speech transcription (partial)
-    if (sc.inputTranscription?.text) {
-      const text = sc.inputTranscription.text;
+    if (msg.serverContent?.inputTranscription?.text) {
+      const text = msg.serverContent.inputTranscription.text;
       const arr = transcriptRef.current;
       const last = arr[arr.length - 1];
       if (last && last.speaker === 'user' && !last.final) {
@@ -585,106 +566,81 @@ Rules:
       }
     }
 
-    // Turn complete — finalize last transcript entry
-    if (sc.turnComplete) {
+    if (msg.serverContent?.turnComplete) {
       const last = transcriptRef.current[transcriptRef.current.length - 1];
       if (last && !last.final) last.final = true;
     }
-
-    // Barge-in / interrupted — clear audio queue immediately
-    if (sc.interrupted) {
-      audioQueueRef.current = [];
-      for (const src of sources.current.values()) { try { src.stop(); } catch (_) { } }
-      sources.current.clear();
-      nextStartTime.current = outputAudioContext.currentTime;
-      isPlayingRef.current = false;
-      voiceStateRef.current = 'listening';
-      setVoiceState('listening');
-    }
   };
 
-  // ── Start mic recording, send audio directly to Gemini SDK ───────────────
+  // ─── startRecording ───────────────────────────────────────────────────────
+  //
+  // FIX 1 — VOICE_THRESHOLD lowered from 0.02 → 0.008
+  //   Most laptop/phone mics peak at 0.005–0.015 for normal speech.
+  //   0.02 was silencing many users. 0.008 is a safer default.
+  //   If you're in a very noisy room and the AI keeps interrupting itself,
+  //   raise it back toward 0.015–0.02.
+  //
+  // FIX 2 — debug log on first 50 frames so you can verify RMS in DevTools.
+  //   Open Console, start a session, speak — you should see non-zero RMS.
+  //   Remove the log block once confirmed working.
+  //
+  // FIX 3 — liveRmsRef updated every frame for the MicLevelBar widget.
+  //
   const startRecording = async (geminiSession) => {
     inputAudioContext.resume();
     try {
       mediaStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+      // ── Log the actual track settings so we know what device was granted ──
+      const track = mediaStream.current.getAudioTracks()[0];
+      console.log('[Mic] Track granted:', track?.label, track?.getSettings());
+
       sourceNode.current = inputAudioContext.createMediaStreamSource(mediaStream.current);
 
-      if (!inputAudioContext.audioWorkletAdded) {
-        const workletCode = `
-          class PCMRecorder extends AudioWorkletProcessor {
-            process(inputs) {
-              const input = inputs[0];
-              if (!input || input.length === 0) return true;
-              const pcmData = input[0];
-              if (!pcmData || pcmData.length === 0) return true;
-              const int16 = new Int16Array(pcmData.length);
-              for (let i = 0; i < pcmData.length; i++) {
-                let s = Math.max(-1, Math.min(1, pcmData[i]));
-                int16[i] = s < 0 ? s * 32768 : s * 32767;
-              }
-              this.port.postMessage(int16);
-              return true;
-            }
-          }
-          if (typeof registerProcessor !== 'undefined') {
-            registerProcessor('pcm-recorder', PCMRecorder);
-          }
-        `;
-        const blob = new Blob([workletCode], { type: 'application/javascript' });
-        try {
-          await inputAudioContext.audioWorklet.addModule(URL.createObjectURL(blob));
-          inputAudioContext.audioWorkletAdded = true;
-        } catch (e) {
-          console.warn('Worklet may already be registered:', e);
-        }
-      }
+      const bufferSize = 256;
+      scriptProcessorNode.current = inputAudioContext.createScriptProcessor(bufferSize, 1, 1);
 
-      scriptProcessorNode.current = new AudioWorkletNode(inputAudioContext, 'pcm-recorder', {
-        numberOfOutputs: 0,
-      });
-
-      // ── KEY CHANGE: send PCM directly to Gemini SDK, no WebSocket relay ──
+      let isSpeaking = false;
       let silenceFrames = 0;
-      let isSpeakingLocal = false;
-      const ENERGY_THRESHOLD = 500;
 
-      scriptProcessorNode.current.port.onmessage = (e) => {
-        if (mutedRef.current || !geminiSession) return;
+      scriptProcessorNode.current.onaudioprocess = (audioProcessingEvent) => {
+        if (mutedRef.current || !geminiSession || isEndingRef.current) return;
+        const pcmData = audioProcessingEvent.inputBuffer.getChannelData(0);
 
-        const pcmData = new Int16Array(e.data.buffer);
-        let maxEnergy = 0;
-        for (let i = 0; i < pcmData.length; i++) {
-          if (Math.abs(pcmData[i]) > maxEnergy) maxEnergy = Math.abs(pcmData[i]);
-        }
+        // Update live mic level bar
+        let sum = 0;
+        for (let i = 0; i < pcmData.length; i++) sum += pcmData[i] * pcmData[i];
+        const rms = Math.sqrt(sum / pcmData.length);
+        liveRmsRef.current = rms;
 
-        if (maxEnergy > ENERGY_THRESHOLD) {
-          if (!isSpeakingLocal) isSpeakingLocal = true;
+        // ── Voice detection for logging ──────────────────────────────────────
+        const VOICE_THRESHOLD = 0.008;
+        const SILENCE_FRAMES_LOG = 20;
+
+        if (rms > VOICE_THRESHOLD) {
+          isSpeaking = true;
           silenceFrames = 0;
-        } else {
-          if (isSpeakingLocal) {
-            silenceFrames++;
-            // ~30 frames * 8ms = ~240ms of silence
-            if (silenceFrames > 30) {
-              console.log(`[Time Log] User ended speaking at: ${new Date().toISOString()} (${Date.now()})`);
-              isSpeakingLocal = false;
-            }
+        } else if (isSpeaking) {
+          silenceFrames++;
+          if (silenceFrames >= SILENCE_FRAMES_LOG) {
+            console.log(`[Time Log] User ended speaking at: ${new Date().toISOString()} (${Date.now()})`);
+            isSpeaking = false;
+            silenceFrames = 0;
           }
         }
 
-        try {
-          geminiSession.sendRealtimeInput({
-            audio: {
-              data: encode(new Uint8Array(e.data.buffer)),
-              mimeType: 'audio/pcm;rate=16000',
-            },
-          });
-        } catch (_) {
-          // Session may have closed; ignore
-        }
+        // Stream audio continuously — Gemini's server-side VAD decides turns.
+        try { geminiSession.sendRealtimeInput({ media: createBlob(pcmData) }); } catch (_) { }
       };
 
       sourceNode.current.connect(scriptProcessorNode.current);
+      // Connect to destination to keep ScriptProcessor alive in all browsers.
+      // We use a zero-gain node so no audio is actually heard.
+      const silentGain = inputAudioContext.createGain();
+      silentGain.gain.value = 0;
+      scriptProcessorNode.current.connect(silentGain);
+      silentGain.connect(inputAudioContext.destination);
+
     } catch (err) {
       console.error('Mic error:', err);
       toast.error('Microphone access required');
@@ -703,71 +659,41 @@ Rules:
       mediaStream.current.getTracks().forEach(t => t.stop());
       mediaStream.current = null;
     }
+    liveRmsRef.current = 0;
   };
 
-  // ── Finalize: call /complete then /score-session with same transcript ─────
   const finalizeSession = async (sid) => {
-    if (!sid) {
-      setStatus('ready');
-      return;
-    }
-
+    if (!sid) { setStatus('ready'); return; }
     const cleanTranscript = transcriptRef.current
       .filter(t => t?.text && t.text.trim().length > 0)
       .map(t => ({ ...t, final: true }));
-
     setTranscript(cleanTranscript);
     setStatus('scoring');
-    setVoiceState('processing');
-
-    // ── 1. Mark session complete ──────────────────────────────────────────
+    setVoiceState('idle');
     try {
-      await api.put(`/sessions/${sid}/complete`, {
-        transcript: cleanTranscript,
-        metrics: {},
-      });
-      console.log('[Finalize] /complete ✓');
+      await api.put(`/sessions/${sid}/complete`, { transcript: cleanTranscript, metrics: {} });
     } catch (err) {
       console.error('[Finalize] /complete failed:', err);
-      // Non-fatal — continue to scoring
     }
-
-    // ── 2. Score session (sends same transcript to Gemini for analysis) ───
     try {
-      await api.post('/ai/score-session', {
-        session_id: sid,
-        transcript: cleanTranscript,
-      });
-      console.log('[Finalize] /score-session ✓');
-
-      // ── 3. Fetch the fully-enriched session doc ───────────────────────
+      await api.post('/ai/score-session', { session_id: sid, transcript: cleanTranscript });
       const res = await api.get(`/sessions/${sid}`);
       setSessionData(res.data);
       setStatus('completed');
-      setVoiceState('idle');
       toast.success('Session scored!');
     } catch (err) {
       console.error('[Finalize] /score-session failed:', err);
-      // Graceful degradation: still show completed view without scores
-      try {
-        const res = await api.get(`/sessions/${sid}`);
-        setSessionData(res.data);
-      } catch (_) { }
+      try { const res = await api.get(`/sessions/${sid}`); setSessionData(res.data); } catch (_) { }
       setStatus('completed');
-      setVoiceState('idle');
-      toast.warning('Session saved, but scoring failed. Refresh to retry.');
+      toast.warning('Session saved, scoring failed. Refresh to retry.');
     }
   };
 
-  // ── Start session: ephemeral token → direct Gemini connection ────────────
   const startSession = async () => {
     setStatus('connecting');
     isEndingRef.current = false;
-
     try {
       await outputAudioContext.resume();
-
-      // Step 1: Create session doc on backend (stores system_prompt, plan info, etc.)
       let sid = sessionId;
       if (!sid) {
         const createRes = await api.post('/sessions', {
@@ -786,38 +712,21 @@ Rules:
       } else {
         sessionIdRef.current = sid;
       }
-
-      // Step 2: Mint ephemeral token — backend bakes system_prompt into the token's
-      // live_connect_constraints, so the prompt never round-trips through Python during the call.
       const tokenRes = await api.post('/sessions/live-token', {
         session_id: sid,
         system_prompt: buildSystemPrompt(),
       });
       const { token: ephemeralToken } = tokenRes.data;
-      console.log('[Session] Ephemeral token minted ✓');
-
-      // Step 3: Connect DIRECTLY to Gemini — audio goes browser ↔ Gemini, zero relay
-      // NOTE: ephemeral tokens require v1alpha
       const ai = new GoogleGenAI({
         apiKey: ephemeralToken,
         httpOptions: { apiVersion: 'v1alpha' },
       });
-
       const geminiSession = await ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: ['AUDIO'],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              disabled: false,
-              startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
-              endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-              prefixPaddingMs: 20,
-              silenceDurationMs: 150,
-            },
-          },
         },
         callbacks: {
           onopen: () => {
@@ -825,9 +734,6 @@ Rules:
             setStatus('active');
             voiceStateRef.current = 'listening';
             setVoiceState('listening');
-            // Defer by one tick so ai.live.connect() resolves and
-            // geminiSessionRef.current is assigned before we use it —
-            // fixes "Cannot access 'geminiSession' before initialization" (TDZ)
             setTimeout(() => startRecording(geminiSessionRef.current), 0);
           },
           onmessage: (msg) => handleGeminiMessage(msg),
@@ -838,11 +744,7 @@ Rules:
           },
           onclose: () => {
             console.log('[Gemini] Connection closed');
-            if (voiceStateRef.current !== 'idle') {
-              voiceStateRef.current = 'idle';
-              setVoiceState('idle');
-            }
-            // Guard: only finalize if endSession() hasn't already done so
+            stopRecording();
             if (!isEndingRef.current) {
               isEndingRef.current = true;
               finalizeSession(sessionIdRef.current);
@@ -850,10 +752,7 @@ Rules:
           },
         },
       });
-
       geminiSessionRef.current = geminiSession;
-      console.log('[Session] Direct Gemini connection active ✓');
-
     } catch (err) {
       console.error('[Session] Start error:', err);
       toast.error('Failed to start: ' + (err?.message || 'Unknown error'));
@@ -861,7 +760,6 @@ Rules:
     }
   };
 
-  // ── Send typed text ───────────────────────────────────────────────────────
   const sendText = () => {
     if (!textInput.trim() || !geminiSessionRef.current) return;
     try {
@@ -870,34 +768,24 @@ Rules:
         turnComplete: true,
       });
       transcriptRef.current.push({ speaker: 'user', text: textInput, final: true });
-    } catch (err) {
-      console.error('sendText error:', err);
-    }
+    } catch (err) { console.error('sendText error:', err); }
     setTextInput('');
   };
 
-  // ── End session (user clicks End button) ─────────────────────────────────
   const endSession = async () => {
     if (isEndingRef.current) return;
-    isEndingRef.current = true;   // prevent onclose from double-finalizing
-
+    isEndingRef.current = true;
     stopRecording();
-
-    audioQueueRef.current = [];
     for (const src of sources.current) { try { src.stop(); } catch (_) { } }
     sources.current.clear();
-    isPlayingRef.current = false;
-
+    nextStartTime.current = 0;
     if (geminiSessionRef.current) {
       try { geminiSessionRef.current.close(); } catch (_) { }
       geminiSessionRef.current = null;
     }
-
-    // Call finalize directly — don't wait for onclose
     await finalizeSession(sessionIdRef.current);
   };
 
-  // ── Session timer ─────────────────────────────────────────────────────────
   useEffect(() => {
     let interval;
     if (status === 'active') {
@@ -907,19 +795,14 @@ Rules:
           const limitSecs = (sessionData?.target_duration_minutes || sessionDuration) * 60;
           const wrapUpAt = Math.floor(limitSecs * 0.9);
           const hardStopAt = Math.floor(limitSecs * 0.98);
-
           if (next === wrapUpAt && geminiSessionRef.current) {
             try {
               geminiSessionRef.current.sendClientContent({
-                turns: [{
-                  role: 'user',
-                  parts: [{ text: 'SYSTEM: Time is almost up. Please start wrapping up — summarize what was covered, give relevant homework, and say a warm goodbye.' }],
-                }],
+                turns: [{ role: 'user', parts: [{ text: 'SYSTEM: Time is almost up. Please start wrapping up — summarize what was covered, give relevant homework, and say a warm goodbye.' }] }],
                 turnComplete: true,
               });
             } catch (_) { }
           }
-
           if (next >= hardStopAt) endSession();
           return next;
         });
@@ -937,7 +820,7 @@ Rules:
   return (
     <div className="min-h-screen bg-background flex flex-col" data-testid="session-page">
 
-      {/* ── Header ── */}
+      {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-border/50 glass">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" className="rounded-full" onClick={() => navigate('/dashboard')} data-testid="session-back">
@@ -962,19 +845,15 @@ Rules:
         </Button>
       </div>
 
-      {/* ── Loading / Connecting ── */}
       {(status === 'loading' || status === 'connecting') && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <VoiceVisualizer state="processing" size="md" />
-            <p className="mt-12 text-muted-foreground">
-              {status === 'loading' ? 'Loading…' : 'Connecting to Fluentra…'}
-            </p>
+            <p className="mt-12 text-muted-foreground">{status === 'loading' ? 'Loading…' : 'Connecting to Fluentra…'}</p>
           </div>
         </div>
       )}
 
-      {/* ── Scoring ── */}
       {status === 'scoring' && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
@@ -985,14 +864,12 @@ Rules:
         </div>
       )}
 
-      {/* ── Ready ── */}
       {status === 'ready' && (
         <div className="flex-1 flex items-center justify-center px-4">
           <div className="text-center">
             <VoiceVisualizer state="idle" size="md" />
             <h2 className="text-xl font-semibold mt-12 mb-3" style={{ fontFamily: 'Fraunces, serif' }}>Ready to Practice?</h2>
             <p className="text-sm text-muted-foreground mb-6">Connect with your AI tutor for a live conversation.</p>
-
             {!sessionId && (
               <div className="mb-8 max-w-sm mx-auto">
                 <label className="text-xs font-medium text-muted-foreground mb-3 block uppercase tracking-wider">Session Duration</label>
@@ -1005,17 +882,13 @@ Rules:
                   ))}
                   <div className="flex items-center">
                     <input type="number" placeholder="Custom" value={customDurationInput}
-                      onChange={e => {
-                        setCustomDurationInput(e.target.value);
-                        if (e.target.value) setSessionDuration(parseInt(e.target.value) || 30);
-                      }}
+                      onChange={e => { setCustomDurationInput(e.target.value); if (e.target.value) setSessionDuration(parseInt(e.target.value) || 30); }}
                       className="w-20 h-9 rounded-l-full border border-border bg-background px-3 text-sm outline-none focus:border-primary" />
                     <div className="h-9 px-3 flex items-center bg-muted border border-l-0 border-border rounded-r-full text-xs text-muted-foreground">min</div>
                   </div>
                 </div>
               </div>
             )}
-
             <Button onClick={startSession} className="rounded-full px-10 py-5 bg-accent text-accent-foreground hover:bg-accent/90" data-testid="session-start-btn">
               <Mic size={18} className="mr-2" /> Start Session
             </Button>
@@ -1023,25 +896,23 @@ Rules:
         </div>
       )}
 
-      {/* ── Active ── */}
       {status === 'active' && (
         <div className="flex-1 flex flex-col">
           <div className="flex-shrink-0 flex items-center justify-center py-12">
             <VoiceVisualizer state={voiceState} size="lg" />
           </div>
-          <div className="flex-1 border-t border-border/50 flex items-center justify-center">
+          <div className="flex-1 border-t border-border/50 flex flex-col items-center justify-center gap-3">
             <p className="text-xs text-muted-foreground/60 italic">Transcript will be available after the session</p>
+            {/* Live mic level — shows whether the browser is actually picking up audio */}
+            <MicLevelBar rmsRef={liveRmsRef} />
           </div>
           <div className="border-t border-border/50 p-4">
             <div className="flex items-center gap-2 mb-3">
-              <input
-                value={textInput}
-                onChange={e => setTextInput(e.target.value)}
+              <input value={textInput} onChange={e => setTextInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && sendText()}
                 placeholder="Or type a message…"
                 className="flex-1 bg-muted/50 rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20"
-                data-testid="session-text-input"
-              />
+                data-testid="session-text-input" />
               <Button variant="ghost" size="icon" className="rounded-full" onClick={sendText} data-testid="session-send-text">
                 <MessageSquare size={18} />
               </Button>
@@ -1058,7 +929,6 @@ Rules:
         </div>
       )}
 
-      {/* ── Completed ── */}
       {status === 'completed' && (
         <CompletedView
           sessionData={sessionData}

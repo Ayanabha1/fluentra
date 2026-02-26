@@ -635,6 +635,7 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                         "system_instruction": system_prompt,
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
+                        "thinking_config": {"thinking_budget": 0},
                         # "thinking_config": {"thinking_budget": 0},
                         # "context_window_compression": {
                         #     "sliding_window": {}
@@ -646,7 +647,7 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
                                 "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
                                 "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
                                 "prefix_padding_ms": 20,
-                                "silence_duration_ms": 150,
+                                "silence_duration_ms": 300,
                             }
                         },
                     }
