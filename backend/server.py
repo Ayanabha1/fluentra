@@ -306,16 +306,38 @@ async def complete_session(session_id: str, input: SessionComplete, background_t
     }
     await db.sessions.update_one({"id": session_id}, {"$set": update_data})
     await db.users.update_one({"id": user["id"]}, {"$inc": {"total_sessions": 1}})
+
+    # Day streak logic:
+    # - Only counts DISTINCT days with at least one completed session
+    # - Multiple sessions on the same day do NOT increase the streak
+    # - Streak increments only when today is exactly 1 day after the last session day
+    # - Any gap > 1 day resets the streak back to 1
     last_session = await db.sessions.find_one(
         {"user_id": user["id"], "status": "completed", "id": {"$ne": session_id}},
         {"_id": 0}, sort=[("completed_at", -1)]
     )
     new_streak = 1
+    current_streak = user.get("current_streak", 0) or 0
     if last_session and last_session.get("completed_at"):
         last_date = datetime.fromisoformat(last_session["completed_at"]).date()
-        if (now.date() - last_date).days <= 1:
-            new_streak = user.get("current_streak", 0) + 1
-    await db.users.update_one({"id": user["id"]}, {"$set": {"current_streak": new_streak, "longest_streak": max(new_streak, user.get("longest_streak", 0))}})
+        day_diff = (now.date() - last_date).days
+        if day_diff == 0:
+            # Another session on the same day: keep existing streak
+            new_streak = max(1, current_streak)
+        elif day_diff == 1:
+            # Consecutive day: extend streak
+            new_streak = max(1, current_streak) + 1
+        else:
+            # Gap > 1 day: reset streak to 1 (today only)
+            new_streak = 1
+
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "current_streak": new_streak,
+            "longest_streak": max(new_streak, user.get("longest_streak", 0) or 0),
+        }}
+    )
     background_tasks.add_task(analyze_session, session_id, user["id"], transcript)
     return await db.sessions.find_one({"id": session_id}, {"_id": 0})
 
