@@ -10,11 +10,10 @@ import { Mic, MicOff, PhoneOff, Sun, Moon, AlertCircle } from 'lucide-react';
 import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
-
-// ─── The @google/genai SDK must be in your package.json ──────────────────────
 import { GoogleGenAI } from '@google/genai';
 
-// ─── Output audio: raw Int16 PCM → AudioBuffer ───────────────────────────────
+// ─── Audio helpers ────────────────────────────────────────────────────────────
+
 function createAudioBufferFromRaw(ctx, arrayBuffer) {
   const rawBytes = new Uint8Array(arrayBuffer);
   const numFrames = rawBytes.length / 2;
@@ -26,7 +25,6 @@ function createAudioBufferFromRaw(ctx, arrayBuffer) {
   return buffer;
 }
 
-// ─── Input audio: Float32 mic → Int16 blob for Gemini ────────────────────────
 function float32ToInt16(float32Array) {
   const int16 = new Int16Array(float32Array.length);
   for (let i = 0; i < float32Array.length; i++) {
@@ -36,41 +34,15 @@ function float32ToInt16(float32Array) {
   return int16;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Stage config ─────────────────────────────────────────────────────────────
 
 const STAGES = [
-  {
-    name: 'Warm-Up',
-    desc: "Let's get to know each other",
-    duration: 2,
-    color: 'from-blue-500/20 to-blue-600/20',
-    accent: 'text-blue-400',
-  },
-  {
-    name: 'Description',
-    desc: 'Paint a picture with words',
-    duration: 3,
-    color: 'from-purple-500/20 to-purple-600/20',
-    accent: 'text-purple-400',
-  },
-  {
-    name: 'Opinion',
-    desc: 'What do you think?',
-    duration: 3,
-    color: 'from-amber-500/20 to-amber-600/20',
-    accent: 'text-amber-400',
-  },
-  {
-    name: 'Storytelling',
-    desc: 'Bring a story to life',
-    duration: 4,
-    color: 'from-green-500/20 to-green-600/20',
-    accent: 'text-green-400',
-  },
+  { name: 'Warm-Up', desc: "Let's get to know each other", duration: 2 },
+  { name: 'Description', desc: 'Paint a picture with words', duration: 3 },
+  { name: 'Opinion', desc: 'What do you think?', duration: 3 },
+  { name: 'Storytelling', desc: 'Bring a story to life', duration: 4 },
 ];
 
-// FIX #2: Richer stage transition prompts in the system prompt
-// Each stage transition tells the AI to give context, not just announce the name.
 const SYSTEM_PROMPT = `You are Fluentra, a warm and encouraging English tutor conducting an initial language assessment. Your goal is to evaluate the student's English level through natural conversation.
 
 Conduct 4 stages:
@@ -95,6 +67,8 @@ Rules:
 - After all 4 stages, say warmly: "You've done wonderfully today — thank you so much for taking the time! I have everything I need to put together your personalized learning plan. The assessment is now complete."
 - Keep your own responses concise — this is about THEIR speaking.`;
 
+// ─── Main component ───────────────────────────────────────────────────────────
+
 export default function AssessmentPage() {
   const [sessionId, setSessionId] = useState(null);
   const [status, setStatus] = useState('intro');
@@ -111,30 +85,24 @@ export default function AssessmentPage() {
 
   const geminiSessionRef = useRef(null);
   const transcriptRef = useRef([]);
-  const aiTurnOpenRef = useRef(false);
-  const userTurnOpenRef = useRef(false);
   const streamRef = useRef(null);
   const sourceNodeRef = useRef(null);
   const scriptProcessorRef = useRef(null);
   const isEndingRef = useRef(false);
+  const transcriptEndRef = useRef(null);
 
-  // Audio contexts created once — never recreated
-  const inputAudioContextRef = useRef(
-    new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
-  );
+  // Output audio — created once
   const outputAudioContextRef = useRef(
     new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
   );
   const outputGainRef = useRef(null);
   const sourcesRef = useRef(new Set());
   const nextStartTimeRef = useRef(0);
-  const transcriptEndRef = useRef(null);
 
   const { user, updateUser } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
-  // Wire up gain node once on mount
   useEffect(() => {
     const ctx = outputAudioContextRef.current;
     const gain = ctx.createGain();
@@ -147,16 +115,15 @@ export default function AssessmentPage() {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
 
-  // FIX #3: Stage detection drives progress bar + FIX #4: "complete" triggers endAssessment
+  // Stage detection
   useEffect(() => {
     if (status !== 'active' || transcript.length === 0) return;
 
     const fullAiText = transcript
-      .filter((t) => t.speaker === 'ai')
-      .map((t) => t.text.toLowerCase())
+      .filter(t => t.speaker === 'ai')
+      .map(t => t.text.toLowerCase())
       .join(' ');
 
-    // Stage advancement — update stageIndex which drives the progress bar
     let newStage = stageIndex;
     if (fullAiText.includes("final part, let's do some storytelling") || fullAiText.includes("mysterious letter")) {
       newStage = 3;
@@ -168,17 +135,14 @@ export default function AssessmentPage() {
 
     if (newStage !== stageIndex) {
       setStageIndex(newStage);
-      // Flash the stage card
       setStageJustChanged(true);
       setTimeout(() => setStageJustChanged(false), 2000);
     }
 
-    // FIX #4: Auto-end when AI says the completion phrase
     if (
       (fullAiText.includes('assessment is now complete') || fullAiText.includes('assessment complete')) &&
       !isEndingRef.current
     ) {
-      // Small delay so the AI finishes speaking
       setTimeout(() => endAssessment(), 2500);
     }
   }, [transcript, status, stageIndex]);
@@ -188,13 +152,11 @@ export default function AssessmentPage() {
     const gain = outputGainRef.current;
     if (!ctx || !gain || ctx.state === 'closed') return;
 
-    // data is base64 string from SDK onmessage
     const binaryStr = atob(data);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
 
     const audioBuffer = createAudioBufferFromRaw(ctx, bytes.buffer);
-
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(gain);
@@ -212,11 +174,51 @@ export default function AssessmentPage() {
     }
   }, []);
 
+  const startMicrophone = async (sessionInstance) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+      streamRef.current = stream;
+
+      const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
+      scriptProcessorRef.current = inputCtx.createScriptProcessor(2048, 1, 1);
+
+      scriptProcessorRef.current.onaudioprocess = (e) => {
+        if (mutedRef.current || isEndingRef.current || !sessionInstance) return;
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = float32ToInt16(float32);
+        const bytes = new Uint8Array(int16.buffer);
+
+        let binary = '';
+        const chunkSize = 1024;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+
+        try {
+          sessionInstance.sendRealtimeInput({
+            media: { data: btoa(binary), mimeType: 'audio/pcm;rate=16000' }
+          });
+        } catch (err) {
+          console.warn('Realtime send failed:', err);
+        }
+      };
+
+      sourceNodeRef.current.connect(scriptProcessorRef.current);
+      scriptProcessorRef.current.connect(inputCtx.destination);
+    } catch (err) {
+      setError('Microphone access denied. Please allow microphone access.');
+      setStatus('intro');
+    }
+  };
+
   const startAssessment = async () => {
     setStatus('connecting');
     setError(null);
     try {
-      await inputAudioContextRef.current.resume();
       await outputAudioContextRef.current.resume();
       nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
 
@@ -249,20 +251,15 @@ export default function AssessmentPage() {
 
       const session = await ai.live.connect({
         model: model,
-        config: {
-          responseModalities: ['AUDIO'],
-        },
+        config: { responseModalities: ['AUDIO'] },
         callbacks: {
           onopen: () => {
             _onOpenCalled = true;
             if (geminiSessionRef.current) _pendingOpen();
           },
-
           onmessage: (message) => {
             const audioPart = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
-            if (audioPart?.data) {
-              playAudio(audioPart.data);
-            }
+            if (audioPart?.data) playAudio(audioPart.data);
 
             const outputTranscript = message.serverContent?.outputTranscription?.text;
             if (outputTranscript) {
@@ -270,18 +267,11 @@ export default function AssessmentPage() {
               const last = cur[cur.length - 1];
               if (last && last.speaker === 'ai' && !last.final) {
                 const sep = last.text.endsWith(' ') ? '' : ' ';
-                transcriptRef.current = [
-                  ...cur.slice(0, -1),
-                  { ...last, text: last.text + sep + outputTranscript }
-                ];
+                transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + outputTranscript }];
               } else {
-                const base = (last && !last.final)
-                  ? [...cur.slice(0, -1), { ...last, final: true }]
-                  : cur;
+                const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
                 transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
               }
-              aiTurnOpenRef.current = true;
-              userTurnOpenRef.current = false;
               setTranscript([...transcriptRef.current]);
             }
 
@@ -291,18 +281,11 @@ export default function AssessmentPage() {
               const last = cur[cur.length - 1];
               if (last && last.speaker === 'user' && !last.final) {
                 const sep = last.text.endsWith(' ') ? '' : ' ';
-                transcriptRef.current = [
-                  ...cur.slice(0, -1),
-                  { ...last, text: last.text + sep + inputTranscript }
-                ];
+                transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + inputTranscript }];
               } else {
-                const base = (last && !last.final)
-                  ? [...cur.slice(0, -1), { ...last, final: true }]
-                  : cur;
+                const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
                 transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
               }
-              userTurnOpenRef.current = true;
-              aiTurnOpenRef.current = false;
               setTranscript([...transcriptRef.current]);
             }
 
@@ -315,37 +298,25 @@ export default function AssessmentPage() {
                 transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
                 setTranscript([...transcriptRef.current]);
               }
-              aiTurnOpenRef.current = false;
-              userTurnOpenRef.current = false;
             }
 
             if (message.serverContent?.interrupted) {
-              for (const source of sourcesRef.current.values()) {
-                try { source.stop(); } catch (e) { }
-              }
+              for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
               sourcesRef.current.clear();
               nextStartTimeRef.current = 0;
               voiceStateRef.current = 'listening';
               setVoiceState('listening');
-
               const cur = transcriptRef.current;
               const last = cur[cur.length - 1];
               if (last && !last.final) {
                 transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
                 setTranscript([...transcriptRef.current]);
               }
-              aiTurnOpenRef.current = false;
-              userTurnOpenRef.current = false;
             }
           },
-
           onclose: () => {
-            if (status === 'active') {
-              voiceStateRef.current = 'idle';
-              setVoiceState('idle');
-            }
+            if (status === 'active') { voiceStateRef.current = 'idle'; setVoiceState('idle'); }
           },
-
           onerror: (err) => {
             console.error('Gemini error:', err);
             setError('Connection error. Please try again.');
@@ -353,58 +324,12 @@ export default function AssessmentPage() {
           }
         }
       });
+
       geminiSessionRef.current = session;
       if (_onOpenCalled) _pendingOpen();
+
     } catch (err) {
-      if (err.response && err.response.data && err.response.data.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError('Failed to create session');
-      }
-      setStatus('intro');
-    }
-  };
-
-  const startMicrophone = async (sessionInstance) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false,
-      });
-      streamRef.current = stream;
-
-      const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(2048, 1, 1);
-
-      scriptProcessorRef.current.onaudioprocess = (e) => {
-        if (mutedRef.current || isEndingRef.current || !sessionInstance) return;
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = float32ToInt16(float32);
-        const bytes = new Uint8Array(int16.buffer);
-
-        let binary = '';
-        const chunkSize = 1024;
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
-        try {
-          sessionInstance.sendRealtimeInput({
-            media: {
-              data: btoa(binary),
-              mimeType: 'audio/pcm;rate=16000',
-            }
-          });
-        } catch (err) {
-          console.warn('Realtime send failed (maybe not fully open):', err);
-        }
-      };
-
-      sourceNodeRef.current.connect(scriptProcessorRef.current);
-      scriptProcessorRef.current.connect(inputCtx.destination);
-    } catch (err) {
-      setError('Microphone access denied. Please allow microphone access.');
+      setError(err?.response?.data?.detail || 'Failed to create session');
       setStatus('intro');
     }
   };
@@ -413,13 +338,11 @@ export default function AssessmentPage() {
     if (isEndingRef.current) return;
     isEndingRef.current = true;
 
-    if (geminiSessionRef.current) {
-      try { geminiSessionRef.current.disconnect(); } catch (e) { }
-    }
-    if (scriptProcessorRef.current) scriptProcessorRef.current.disconnect();
-    if (sourceNodeRef.current) sourceNodeRef.current.disconnect();
+    if (geminiSessionRef.current) { try { geminiSessionRef.current.disconnect(); } catch (_) { } }
+    try { scriptProcessorRef.current?.disconnect(); } catch (_) { }
+    try { sourceNodeRef.current?.disconnect(); } catch (_) { }
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (e) { } }
+    for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
     sourcesRef.current.clear();
 
     setStatus('scoring');
@@ -427,19 +350,37 @@ export default function AssessmentPage() {
     setVoiceState('idle');
 
     try {
-      // Clean up transcript
       const cleanTranscript = transcriptRef.current
         .filter(t => t.text && t.text.trim().length > 0)
         .map(t => ({ ...t, final: true }));
 
-      setScoringStep('Storing Data...');
+      setScoringStep('Storing session...');
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
 
-      setScoringStep('Assessing conversation...');
+      setScoringStep('Assessing your English...');
       const res = await api.post(`/sessions/${sessionId}/score-assessment`, { transcript: cleanTranscript });
-      setScores(res.data);
 
-      setScoringStep('Creating Customized Learning Plan...');
+      // ── FIX: normalise field names from the API response ─────────────────
+      // The score-assessment endpoint returns its own schema (fluency_score,
+      // grammar_score, areas_to_improve etc.). Map them to a consistent shape
+      // so the results UI never shows wrong values.
+      const raw = res.data;
+      const normalised = {
+        // Scores (already correct in the API response)
+        fluency_score: raw.fluency_score ?? 0,
+        grammar_score: raw.grammar_score ?? 0,
+        vocabulary_score: raw.vocabulary_score ?? 0,
+        confidence_score: raw.confidence_score ?? 0,
+        weighted_score: raw.weighted_score ?? 0,
+        cefr_level: raw.cefr_level ?? 'B1',
+        // Arrays — handle both field name variants defensively
+        strengths: raw.strengths ?? [],
+        areas_to_improve: raw.areas_to_improve ?? raw.areas_for_improvement ?? [],
+        detailed_feedback: raw.detailed_feedback ?? '',
+      };
+      setScores(normalised);
+
+      setScoringStep('Creating your learning plan...');
       await api.post('/learning-plan/generate');
 
       setScoringStep('Finalizing...');
@@ -449,7 +390,12 @@ export default function AssessmentPage() {
     } catch (err) {
       toast.error('Scoring failed, but your session was saved');
       setStatus('done');
-      setScores({ cefr_level: 'B1', weighted_score: 50, fluency_score: 5, grammar_score: 5, vocabulary_score: 5, confidence_score: 5, strengths: ['Good effort'], areas_to_improve: ['Keep practicing'], detailed_feedback: 'Assessment recorded.' });
+      setScores({
+        cefr_level: 'B1', weighted_score: 50,
+        fluency_score: 5, grammar_score: 5, vocabulary_score: 5, confidence_score: 5,
+        strengths: ['Good effort'], areas_to_improve: ['Keep practicing'],
+        detailed_feedback: 'Assessment recorded.',
+      });
     }
   };
 
@@ -464,11 +410,17 @@ export default function AssessmentPage() {
                 initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ delay: 0.2, type: 'spring' }}
                 className="w-24 h-24 rounded-full bg-accent/20 flex items-center justify-center mx-auto mb-6"
               >
-                <span className="text-4xl font-bold text-accent" style={{ fontFamily: 'JetBrains Mono' }}>{scores.cefr_level}</span>
+                <span className="text-4xl font-bold text-accent" style={{ fontFamily: 'JetBrains Mono' }}>
+                  {scores.cefr_level}
+                </span>
               </motion.div>
-              <h2 className="text-2xl font-semibold mb-2" style={{ fontFamily: 'Fraunces, serif' }}>Assessment Complete!</h2>
-              <p className="text-muted-foreground mb-6">Your English level: <span className="font-bold text-foreground">{scores.cefr_level}</span></p>
 
+              <h2 className="text-2xl font-semibold mb-2" style={{ fontFamily: 'Fraunces, serif' }}>Assessment Complete!</h2>
+              <p className="text-muted-foreground mb-6">
+                Your English level: <span className="font-bold text-foreground">{scores.cefr_level}</span>
+              </p>
+
+              {/* Score grid — all four metrics from the API response */}
               <div className="grid grid-cols-2 gap-3 mb-6 text-left">
                 {[
                   { label: 'Fluency', val: scores.fluency_score },
@@ -487,24 +439,51 @@ export default function AssessmentPage() {
                 ))}
               </div>
 
+              {/* Overall score */}
+              <div className="mb-4 bg-accent/10 rounded-xl p-4 text-center">
+                <div className="text-xs text-muted-foreground mb-1 uppercase tracking-wider">Overall Score</div>
+                <div className="text-3xl font-bold text-accent" style={{ fontFamily: 'JetBrains Mono' }}>
+                  {scores.weighted_score}<span className="text-lg text-muted-foreground">/100</span>
+                </div>
+              </div>
+
+              {/* Strengths */}
               {scores.strengths?.length > 0 && (
                 <div className="text-left mb-4 bg-green-500/10 rounded-xl p-4">
                   <div className="text-sm font-medium mb-2 text-green-500">✓ Strengths</div>
                   <ul className="text-sm text-muted-foreground space-y-1">
-                    {scores.strengths.map((s, i) => <li key={i}>{s}</li>)}
-                  </ul>
-                </div>
-              )}
-              {scores.areas_to_improve?.length > 0 && (
-                <div className="text-left mb-6 bg-accent/10 rounded-xl p-4">
-                  <div className="text-sm font-medium mb-2 text-accent">→ Areas to Improve</div>
-                  <ul className="text-sm text-muted-foreground space-y-1">
-                    {scores.areas_to_improve.map((s, i) => <li key={i}>{s}</li>)}
+                    {scores.strengths.map((s, i) => (
+                      <li key={i}>{typeof s === 'string' ? s : JSON.stringify(s)}</li>
+                    ))}
                   </ul>
                 </div>
               )}
 
-              <Button onClick={() => navigate('/dashboard')} className="w-full rounded-full py-5 text-base bg-accent text-accent-foreground hover:bg-accent/90" data-testid="go-to-dashboard">
+              {/* Areas to improve */}
+              {scores.areas_to_improve?.length > 0 && (
+                <div className="text-left mb-4 bg-accent/10 rounded-xl p-4">
+                  <div className="text-sm font-medium mb-2 text-accent">→ Areas to Improve</div>
+                  <ul className="text-sm text-muted-foreground space-y-1">
+                    {scores.areas_to_improve.map((s, i) => (
+                      <li key={i}>{typeof s === 'string' ? s : JSON.stringify(s)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Detailed feedback */}
+              {scores.detailed_feedback && (
+                <div className="text-left mb-6 bg-muted/30 rounded-xl p-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Tutor Feedback</div>
+                  <p className="text-sm text-foreground/80 leading-relaxed">{scores.detailed_feedback}</p>
+                </div>
+              )}
+
+              <Button
+                onClick={() => navigate('/dashboard')}
+                className="w-full rounded-full py-5 text-base bg-accent text-accent-foreground hover:bg-accent/90"
+                data-testid="go-to-dashboard"
+              >
                 Go to Dashboard →
               </Button>
             </CardContent>
@@ -544,7 +523,6 @@ export default function AssessmentPage() {
                   <AlertCircle size={14} />{error}
                 </div>
               )}
-              {/* Stage preview */}
               <div className="grid grid-cols-2 gap-2 mb-6">
                 {STAGES.map((s, i) => (
                   <div key={i} className="bg-muted/40 rounded-xl p-3 text-left">
@@ -575,13 +553,13 @@ export default function AssessmentPage() {
       {status === 'active' && (
         <div className="flex-1 flex flex-col">
 
-          {/* FIX #3: Stage progress bar — driven by stageIndex state */}
+          {/* Stage progress */}
           <div className="px-5 pt-4 pb-3 border-b border-border/50">
             <div className="flex gap-2 mb-3">
               {STAGES.map((s, i) => (
                 <div key={i} className="flex-1 relative">
                   <motion.div
-                    className={`h-1.5 rounded-full ${i < stageIndex ? 'bg-accent' : i === stageIndex ? 'bg-accent' : 'bg-border'}`}
+                    className={`h-1.5 rounded-full ${i <= stageIndex ? 'bg-accent' : 'bg-border'}`}
                     initial={false}
                     animate={{ scaleX: i <= stageIndex ? 1 : 0, originX: 0 }}
                     transition={{ duration: 0.5, ease: 'easeOut' }}
@@ -590,18 +568,14 @@ export default function AssessmentPage() {
                 </div>
               ))}
             </div>
-
-            {/* Animated stage card */}
             <AnimatePresence mode="wait">
               <motion.div
                 key={stageIndex}
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
+                initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}
                 transition={{ duration: 0.3 }}
                 className="flex items-center gap-3"
               >
-                <div className={`text-xs font-semibold px-2.5 py-1 rounded-full bg-accent/15 text-accent`}>
+                <div className="text-xs font-semibold px-2.5 py-1 rounded-full bg-accent/15 text-accent">
                   Stage {stageIndex + 1} of {STAGES.length}
                 </div>
                 <div>
@@ -612,12 +586,9 @@ export default function AssessmentPage() {
             </AnimatePresence>
           </div>
 
-          {/* Voice visualizer */}
+          {/* Visualiser */}
           <div className="flex-1 flex flex-col items-center justify-center py-8">
             <VoiceVisualizer state={voiceState} size="lg" />
-            {/* <p className="text-xs text-muted-foreground mt-4">
-              {voiceState === 'speaking' ? 'Tutor is speaking...' : voiceState === 'listening' ? 'Listening...' : ''}
-            </p> */}
           </div>
 
           {/* Transcript */}
@@ -639,7 +610,11 @@ export default function AssessmentPage() {
 
           {/* Controls */}
           <div className="flex items-center justify-center gap-4 p-4 border-t border-border/50">
-            <Button variant="outline" size="icon" className="rounded-full w-12 h-12" onClick={() => { setMuted(!muted); mutedRef.current = !muted; }} data-testid="mute-toggle">
+            <Button
+              variant="outline" size="icon" className="rounded-full w-12 h-12"
+              onClick={() => { setMuted(!muted); mutedRef.current = !muted; }}
+              data-testid="mute-toggle"
+            >
               {muted ? <MicOff size={20} className="text-destructive" /> : <Mic size={20} />}
             </Button>
             <Button
