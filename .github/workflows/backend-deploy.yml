@@ -31,9 +31,4 @@ jobs:
 
       - name: Restart Backend Service
         run: |
-          # TODO: Add your command to restart the backend service here.
-          # Example for systemd:
-          # sudo systemctl restart fluentra-backend
-          # Example for pm2:
-          # pm2 restart server.py
-          echo "Restarting backend..."
+          uvicorn server:app --reload --port 8000
