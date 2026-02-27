@@ -59,6 +59,94 @@ def get_gemini_live_client():
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 TEXT_MODEL = "gemini-2.5-pro"  # 1500 req/day free vs gemini-2.5-flash 20 req/day
 
+
+async def ensure_tutor_persona(user_id: str) -> dict:
+    """
+    Ensure the user has a stored human tutor persona + base system prompt in Mongo.
+    If missing, generate one with Gemini, persist it, and return the updated user doc.
+    """
+    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user_doc.get("tutor_system_prompt"):
+        return user_doc
+
+    lvl = user_doc.get("cefr_level") or "A1"
+    goals = user_doc.get("learning_goals", [])
+
+    persona_prompt = f"""You are an expert character designer for language tutors.
+
+Create a single HUMAN Indian English tutor persona that will talk to the student in every session.
+
+Student context:
+- Current CEFR level: {lvl}
+- Learning goals: {', '.join(goals) if goals else "General English improvement"}
+
+Design a persona who:
+- Has an Indian first name
+- Lives in an Indian city
+- Has a brief life story and a few hobbies
+- Speaks warm, natural conversational English
+- Occasionally shares things about her own life, plans, or past experiences
+- Never describes herself as an AI assistant
+
+Respond ONLY with valid JSON:
+{{
+  "name": "Pooja",
+  "age": 27,
+  "city": "Bengaluru",
+  "background": "Short 1–2 sentence life/background summary.",
+  "hobbies": ["reading", "music"],
+  "teaching_style": "Warm, encouraging, conversational, never just firing questions.",
+  "system_prompt": "You are Pooja, a warm Indian English coach from Bengaluru. You are a real human tutor, not an AI assistant. You speak natural, friendly English, sometimes sharing small details about your own life and plans so it feels like a two-way conversation, not an interview."
+}}"""
+
+    try:
+        response = await asyncio.to_thread(
+            get_gemini_client().models.generate_content,
+            model=TEXT_MODEL,
+            contents=persona_prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        data = json.loads(response.text)
+    except Exception:
+        # Fallback simple persona if generation fails
+        data = {
+            "name": "Pooja",
+            "age": 27,
+            "city": "Bengaluru",
+            "background": "An Indian English coach who loves helping learners gain confidence.",
+            "hobbies": ["reading", "music"],
+            "teaching_style": "Warm, encouraging, conversational, never just firing questions.",
+            "system_prompt": ""
+        }
+
+    name = data.get("name") or "Pooja"
+    city = data.get("city") or "Bengaluru"
+    base_system_prompt = data.get("system_prompt") or (
+        f"You are {name}, a warm Indian English coach from {city}. "
+        "You are a real human tutor, not an AI assistant. "
+        "You speak natural, friendly English and occasionally share small details about your own life and plans so it feels like a two-way conversation, not an interview."
+    )
+
+    tutor_profile = {
+        "name": name,
+        "age": data.get("age", 27),
+        "city": city,
+        "background": data.get("background", ""),
+        "hobbies": data.get("hobbies", []),
+        "teaching_style": data.get("teaching_style", ""),
+    }
+
+    update_fields = {
+        "tutor_profile": tutor_profile,
+        "tutor_system_prompt": base_system_prompt,
+    }
+    await db.users.update_one({"id": user_id}, {"$set": update_fields})
+    user_doc.update(update_fields)
+    return user_doc
+
 JWT_SECRET = os.environ.get('JWT_SECRET', 'fluentra-secret-key-change-in-production')
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 72
@@ -178,7 +266,9 @@ async def login(input: LoginInput):
     if not user or not verify_password(input.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_token(user["id"])
-    return {"token": token, "user": clean_user(user)}
+    # Ensure a per-user tutor persona is created and stored
+    user_with_persona = await ensure_tutor_persona(user["id"])
+    return {"token": token, "user": clean_user(user_with_persona)}
 
 @api_router.get("/auth/me")
 async def get_me(user=Depends(get_current_user)):
@@ -406,11 +496,15 @@ async def get_learning_plan(user=Depends(get_current_user)):
 
 @api_router.post("/learning-plan/generate")
 async def generate_learning_plan(user=Depends(get_current_user)):
+    # Refresh user with tutor persona info
+    user = await ensure_tutor_persona(user["id"])
     current_level = user.get("cefr_level", "A1")
     target_level = user.get("target_cefr_level", "B2")
     goals = user.get("learning_goals", [])
     spw = user.get("sessions_per_week", 3)
-    prompt = f"""You are an expert English curriculum designer. Create a personalized spoken English learning plan.
+    tutor_profile = user.get("tutor_profile", {}) or {}
+    tutor_name = tutor_profile.get("name", "your tutor")
+    prompt = f"""You are an expert English curriculum designer. Create a personalized spoken English learning plan that this tutor will follow in live sessions.
 
 Student profile:
 - Current CEFR level: {current_level}
@@ -419,17 +513,19 @@ Student profile:
 - Sessions per week: {spw}
 - Each session is a SHORT voice conversation between 5 and 10 minutes (target duration in that range, not strictly fixed)
 
+Tutor persona (already created and stored for this user — you MUST keep her identity consistent):
+- Name: {tutor_profile.get('name', 'Pooja')}
+- City: {tutor_profile.get('city', 'an Indian city')}
+- Background: {tutor_profile.get('background', 'An Indian English coach who loves helping learners.')}
+- Hobbies: {', '.join(tutor_profile.get('hobbies', [])) or 'reading, music'}
+- Teaching style: {tutor_profile.get('teaching_style', 'Warm, encouraging, conversational, never just firing questions.')}
+
 Create exactly 4 weekly modules. Each module must have EXACTLY {spw} sessions.
 Sessions are SEQUENTIAL and PROGRESSIVE — each builds on the previous one.
 
-First, define a HUMAN tutor persona with an INDIAN name and background:
-- The tutor is a real person, not "an AI assistant".
-- Give her an Indian first name (for example "Pooja", "Aanya", "Shreya", etc.), a city she lives in, a short life story, hobbies, and teaching style.
-- She occasionally shares things about her own life, plans, or past experiences so it feels like two humans talking.
-
 For EVERY session, write a "system_prompt" field. This is the FULL instruction given to the voice tutor PERSONA for that session. It must:
 1. Start with the persona, e.g. "You are {tutor_name}, a warm Indian English coach. This is [Week X, Session Y]."
-2. Briefly restate 1–2 key facts from her bio (e.g. where she lives, what she likes) so the model stays in character.
+2. Briefly restate 1–2 key facts from her bio (for this specific user) so the model stays in character.
 3. Specify the EXACT topic and activity for the conversation (assume roughly 5–10 minutes).
 4. List 2–3 specific phrases, structures, or vocabulary to introduce.
 5. Describe how to correct errors for a {current_level} student (gently, inline).
@@ -447,14 +543,6 @@ Difficulty progression:
 Respond ONLY with valid JSON matching this EXACT structure:
 {{
   "estimated_weeks": 4,
-  "tutor_profile": {{
-    "name": "Pooja",
-    "age": 28,
-    "city": "Bengaluru",
-    "background": "Short 1–2 sentence life/background summary",
-    "hobbies": ["reading", "music"],
-    "teaching_style": "Warm, encouraging, conversational, never just firing questions"
-  }},
   "modules": [
     {{
       "title": "Week 1: Daily Life",
@@ -465,9 +553,9 @@ Respond ONLY with valid JSON matching this EXACT structure:
         {{
           "type": "speaking",
           "title": "Introducing Yourself",
-                  "description": "Practice introducing yourself with name, job, and where you live",
-                  "duration_minutes": 8,
-          "system_prompt": "You are Pooja, a warm Indian English coach from Bengaluru. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by briefly introducing yourself (name, where you live, one hobby) and then ask their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Mix questions with natural comments about your own life so it feels like two humans chatting, not an interview. Always keep the conversation open-ended. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, ask if they have any other questions or anything else to practice. If they say no, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
+          "description": "Practice introducing yourself with name, job, and where you live",
+          "duration_minutes": 8,
+          "system_prompt": "You are {tutor_name}, a warm Indian English coach. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by briefly introducing yourself (name, where you live, one hobby) and then ask their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Mix questions with natural comments about your own life so it feels like two humans chatting, not an interview. Always keep the conversation open-ended. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. Towards the end, ask if they have any other questions or anything else to practice. If they say no, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
         }}
       ]
     }}
@@ -650,9 +738,19 @@ async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)
     if not s_doc:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Ensure we have this user's tutor persona + base system prompt
+    user = await ensure_tutor_persona(user["id"])
+    tutor_system_prompt = user.get("tutor_system_prompt", "")
+
     # Prefer system_prompt baked into the session doc (from plan template).
     # Fall back to whatever the frontend sent.
-    system_prompt = s_doc.get("system_prompt") or input.system_prompt
+    base_prompt = s_doc.get("system_prompt") or input.system_prompt or ""
+
+    # If the base prompt already includes the tutor system prompt, don't duplicate it.
+    if tutor_system_prompt and tutor_system_prompt.strip() in base_prompt:
+        system_prompt = base_prompt
+    else:
+        system_prompt = (tutor_system_prompt + "\n\n" + base_prompt).strip()
     try:
         last_session = await db.sessions.find_one(
             {"user_id": user["id"], "status": "completed", "analysis.summary": {"$exists": True},
@@ -945,6 +1043,8 @@ class ScoreSessionInput(BaseModel):
 @api_router.post("/ai/score-session")
 async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_user)):
     import re
+    # Ensure tutor persona exists for this user (used when adapting future prompts)
+    user = await ensure_tutor_persona(user["id"])
     session_id = input.session_id
     s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not s:
@@ -1169,8 +1269,11 @@ Return ONLY valid JSON with this exact structure:
                             f"'{m.get('original')}' → should be '{m.get('corrected')}' ({m.get('explanation', '')})"
                             for m in scores.get("mistakes", [])[:3] if m.get("original")
                         ]
+                        tutor_profile = user.get("tutor_profile", {}) or {}
+                        tutor_name = tutor_profile.get("name", "your tutor")
+                        tutor_city = tutor_profile.get("city", "an Indian city")
                         adapt_prompt = f"""You are an expert English curriculum designer.
-A student just completed a 10-minute English speaking session with a HUMAN Indian tutor persona (for example, Pooja from Bengaluru). Based on their performance, rewrite the system_prompt for their NEXT session to be perfectly tailored to their needs while KEEPING the same human persona, name, and backstory.
+A student just completed a 10-minute English speaking session with a HUMAN Indian tutor persona named {tutor_name} from {tutor_city}. Based on their performance, rewrite the system_prompt for their NEXT session to be perfectly tailored to their needs while KEEPING the same human persona, name, and backstory.
 
 JUST-COMPLETED SESSION PERFORMANCE:
 - Overall score: {scores.get('overall_score', 0)}/100
