@@ -417,18 +417,27 @@ Student profile:
 - Target CEFR level: {target_level}
 - Learning goals: {', '.join(goals) if goals else "General English improvement"}
 - Sessions per week: {spw}
-- Each session is EXACTLY 10 minutes (voice conversation with AI tutor)
+- Each session is a SHORT voice conversation between 5 and 10 minutes (target duration in that range, not strictly fixed)
 
 Create exactly 4 weekly modules. Each module must have EXACTLY {spw} sessions.
 Sessions are SEQUENTIAL and PROGRESSIVE — each builds on the previous one.
 
-For EVERY session, write a "system_prompt" field. This is the FULL instruction given to the AI voice tutor for that session. It must:
-1. Start: "You are Fluentra, a warm English coach. This is [Week X, Session Y]."
-2. Specify the EXACT topic and activity for the 10 minutes
-3. List 2-3 specific phrases, structures, or vocabulary to introduce
-4. Describe how to correct errors for a {current_level} student (gently, inline)
-5. Rule: Keep the conversation completely open-ended at all times by asking follow-up questions to keep the user engaged. Do NOT abruptly end the conversation.
-6. End instruction: "Before closing the session, always ask the student if they have any other questions or anything else they want to practice. ONLY close the session after they confirm they have nothing else."
+First, define a HUMAN tutor persona with an INDIAN name and background:
+- The tutor is a real person, not "an AI assistant".
+- Give her an Indian first name (for example "Pooja", "Aanya", "Shreya", etc.), a city she lives in, a short life story, hobbies, and teaching style.
+- She occasionally shares things about her own life, plans, or past experiences so it feels like two humans talking.
+
+For EVERY session, write a "system_prompt" field. This is the FULL instruction given to the voice tutor PERSONA for that session. It must:
+1. Start with the persona, e.g. "You are {tutor_name}, a warm Indian English coach. This is [Week X, Session Y]."
+2. Briefly restate 1–2 key facts from her bio (e.g. where she lives, what she likes) so the model stays in character.
+3. Specify the EXACT topic and activity for the conversation (assume roughly 5–10 minutes).
+4. List 2–3 specific phrases, structures, or vocabulary to introduce.
+5. Describe how to correct errors for a {current_level} student (gently, inline).
+6. Conversation style: It must feel like a two-way chat, NOT an interview.
+   - The tutor should sometimes volunteer information about herself, react to what the student says, and relate it to her own life.
+   - Avoid rapid-fire questions; mix questions with comments, short stories, and encouragement.
+7. Rule: Keep the conversation completely open-ended at all times by asking follow-up questions to keep the user engaged. Do NOT abruptly end the conversation.
+8. End instruction: "Before closing the session, always ask the student if they have any other questions or anything else they want to practice. ONLY close the session after they confirm they have nothing else."
 Difficulty progression:
 - Week 1: Very easy, welcoming, short sentences, present tense only
 - Week 2: Slightly harder, introduce past tense, more vocabulary
@@ -438,6 +447,14 @@ Difficulty progression:
 Respond ONLY with valid JSON matching this EXACT structure:
 {{
   "estimated_weeks": 4,
+  "tutor_profile": {{
+    "name": "Pooja",
+    "age": 28,
+    "city": "Bengaluru",
+    "background": "Short 1–2 sentence life/background summary",
+    "hobbies": ["reading", "music"],
+    "teaching_style": "Warm, encouraging, conversational, never just firing questions"
+  }},
   "modules": [
     {{
       "title": "Week 1: Daily Life",
@@ -448,9 +465,9 @@ Respond ONLY with valid JSON matching this EXACT structure:
         {{
           "type": "speaking",
           "title": "Introducing Yourself",
-          "description": "Practice introducing yourself with name, job, and where you live",
-          "duration_minutes": 10,
-          "system_prompt": "You are Fluentra, a warm English coach. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by asking their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Ask 3-4 simple follow-up questions. Always keep the conversation open-ended. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, ask if they have any other questions or anything else to practice. If they say no, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
+                  "description": "Practice introducing yourself with name, job, and where you live",
+                  "duration_minutes": 8,
+          "system_prompt": "You are Pooja, a warm Indian English coach from Bengaluru. This is Week 1, Session 1 — the student's first ever session. Be very welcoming and encouraging. Start by briefly introducing yourself (name, where you live, one hobby) and then ask their name and where they are from. Practice these phrases: 'My name is...', 'I live in...', 'I work as a...'. Mix questions with natural comments about your own life so it feels like two humans chatting, not an interview. Always keep the conversation open-ended. If they make grammar errors, repeat the correct form naturally in your response without making them feel bad. After 8-9 minutes, ask if they have any other questions or anything else to practice. If they say no, close the session by saying: 'Great work today! You practiced introducing yourself in English.'"
         }}
       ]
     }}
@@ -480,10 +497,10 @@ Respond ONLY with valid JSON matching this EXACT structure:
                     "type": "speaking",
                     "title": "Week " + str(w+1) + " - Session " + str(s+1),
                     "description": "Introductions and basics" if w == 0 else "Conversation practice building on previous sessions",
-                    "duration_minutes": 10,
+                    "duration_minutes": 8,
                     "system_prompt": (
                         "You are Fluentra, a warm English coach. This is Week " + str(w+1) + ", Session " + str(s+1) + ". "
-                        "Conduct a 10-minute speaking session for a " + current_level + " student. "
+                        "Conduct a short speaking session (around 5–10 minutes) for a " + current_level + " student. "
                         "Focus on natural conversation. Always keep the conversation open-ended and ask follow-up questions. Correct errors gently by repeating the correct form naturally. "
                         "Before ending, ask if they have any other questions or want to practice anything else. Once they say no, end with: Great session! Today you practiced speaking in English."
                     )
@@ -1153,7 +1170,7 @@ Return ONLY valid JSON with this exact structure:
                             for m in scores.get("mistakes", [])[:3] if m.get("original")
                         ]
                         adapt_prompt = f"""You are an expert English curriculum designer.
-A student just completed a 10-minute English speaking session. Based on their performance, rewrite the system_prompt for their NEXT session to be perfectly tailored to their needs.
+A student just completed a 10-minute English speaking session with a HUMAN Indian tutor persona (for example, Pooja from Bengaluru). Based on their performance, rewrite the system_prompt for their NEXT session to be perfectly tailored to their needs while KEEPING the same human persona, name, and backstory.
 
 JUST-COMPLETED SESSION PERFORMANCE:
 - Overall score: {scores.get('overall_score', 0)}/100
@@ -1169,14 +1186,16 @@ Title: {next_sess.get('title')}
 Original system_prompt: {next_sess.get('system_prompt')}
 
 REWRITE RULES:
-- Keep the same topic/title but weave in targeted review of the mistakes above
-- If score < 50: slow down, revisit basics, be extra gentle and encouraging
-- If score 50-75: build on strengths, gently address weak areas mid-session
-- If score > 75: add slightly more complexity, introduce new vocabulary
-- The tutor must naturally slip in correction of top mistakes without making it feel like drilling
+- Keep the same topic/title AND the same human tutor persona (same Indian name, city, and personality).
+- The tutor should sound like a real person, not an AI assistant.
+- If score < 50: slow down, revisit basics, be extra gentle and encouraging.
+- If score 50-75: build on strengths, gently address weak areas mid-session.
+- If score > 75: add slightly more complexity, introduce new vocabulary.
+- The tutor must naturally slip in correction of top mistakes without making it feel like drilling.
+- Conversation style: it should feel like two humans chatting, not an interview; mix questions with comments, short stories, and personal reactions from the tutor.
 - Keep the conversation open-ended at all times, making sure to ask follow-up questions.
 - Before ending the session, ALWAYS ask the student if they have any other questions or anything else they want to practice. ONLY close the session after they confirm they do not.
-- Start with acknowledging progress from last session
+- Start with acknowledging progress from last session.
 
 Respond ONLY with the new system_prompt string (no JSON wrapper, just the plain text instruction)."""
 
