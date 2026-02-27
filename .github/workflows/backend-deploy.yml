@@ -29,7 +29,6 @@ jobs:
           source venv/bin/activate
           pip install -r requirements.txt
 
-      - name: Restart Backend Service
-        working-directory: ./backend
+      - name: Restart backend systemd service
         run: |
-          ./venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
+          sudo systemctl restart fluentra-backend.service
