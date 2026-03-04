@@ -8,29 +8,7 @@ import { toast } from 'sonner';
 import { Mic, MicOff, PhoneOff, Sun, Moon, ArrowLeft } from 'lucide-react';
 import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
-import { GoogleGenAI } from '@google/genai';
-
-// ─── Audio helpers — copied verbatim from AssessmentPage ─────────────────────
-
-function createAudioBufferFromRaw(ctx, arrayBuffer) {
-  const rawBytes = new Uint8Array(arrayBuffer);
-  const numFrames = rawBytes.length / 2;
-  const buffer = ctx.createBuffer(1, numFrames, 24000);
-  const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, numFrames);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-  buffer.copyToChannel(float32, 0);
-  return buffer;
-}
-
-function float32ToInt16(float32Array) {
-  const int16 = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32Array[i]));
-    int16[i] = s * 32768;
-  }
-  return int16;
-}
+import useGeminiLive from '@/hooks/useGeminiLive';
 
 // ─── Completed session UI ─────────────────────────────────────────────────────
 
@@ -399,42 +377,25 @@ export default function SessionPage() {
   const [sessionId, setSessionId] = useState(paramId);
   const [sessionData, setSessionData] = useState(null);
   const [status, setStatus] = useState('loading');
-  const [voiceState, setVoiceState] = useState('idle');
-  const voiceStateRef = useRef('idle');
   const [transcript, setTranscript] = useState([]);
-  const [muted, setMuted] = useState(false);
-  const mutedRef = useRef(false);
   const [secondsElapsed, setSecondsElapsed] = useState(0);
   const [sessionDuration, setSessionDuration] = useState(30);
   const [customDurationInput, setCustomDurationInput] = useState('');
 
-  // ── Output audio — created once at top level, exactly like AssessmentPage ──
-  const outputAudioContextRef = useRef(
-    new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
-  );
-  const outputGainRef = useRef(null);
-  const sourcesRef = useRef(new Set());
-  const nextStartTimeRef = useRef(0);
-
-  // ── Input audio — created fresh inside startMicrophone, like AssessmentPage
-  const streamRef = useRef(null);
-  const sourceNodeRef = useRef(null);
-  const scriptProcessorRef = useRef(null);
-
   // ── Session refs ───────────────────────────────────────────────────────────
-  const geminiSessionRef = useRef(null);
   const sessionIdRef = useRef(null);
-  const transcriptRef = useRef([]);
   const isEndingRef = useRef(false);
 
-  // ── Wire output gain once — same as AssessmentPage useEffect ──────────────
-  useEffect(() => {
-    const ctx = outputAudioContextRef.current;
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    outputGainRef.current = gain;
-    nextStartTimeRef.current = ctx.currentTime;
-  }, []);
+  const {
+    voiceState,
+    muted,
+    setMuted,
+    resetTranscript,
+    getCleanTranscript,
+    connect,
+    disconnect,
+    sendText,
+  } = useGeminiLive();
 
   // ── Load session ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -467,151 +428,12 @@ Rules:
 - Keep responses concise — this is about THEIR speaking practice.`;
   };
 
-  // ── playAudio — copied verbatim from AssessmentPage ───────────────────────
-  const playAudio = useCallback((data) => {
-    const ctx = outputAudioContextRef.current;
-    const gain = outputGainRef.current;
-    if (!ctx || !gain || ctx.state === 'closed') return;
-
-    const binaryStr = atob(data);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-
-    const audioBuffer = createAudioBufferFromRaw(ctx, bytes.buffer);
-    const src = ctx.createBufferSource();
-    src.buffer = audioBuffer;
-    src.connect(gain);
-
-    nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-    src.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += audioBuffer.duration;
-
-    sourcesRef.current.add(src);
-    src.addEventListener('ended', () => sourcesRef.current.delete(src));
-
-    if (voiceStateRef.current !== 'speaking') {
-      voiceStateRef.current = 'speaking';
-      setVoiceState('speaking');
-    }
-  }, []);
-
-  // ── startMicrophone — copied verbatim from AssessmentPage ─────────────────
-  const startMicrophone = async (sessionInstance) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false,
-      });
-      streamRef.current = stream;
-
-      const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(2048, 1, 1);
-
-      scriptProcessorRef.current.onaudioprocess = (e) => {
-        if (mutedRef.current || isEndingRef.current || !sessionInstance) return;
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = float32ToInt16(float32);
-        const bytes = new Uint8Array(int16.buffer);
-
-        let binary = '';
-        const chunkSize = 1024;
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
-        try {
-          sessionInstance.sendRealtimeInput({
-            media: { data: btoa(binary), mimeType: 'audio/pcm;rate=16000' }
-          });
-        } catch (err) {
-          console.warn('sendRealtimeInput failed:', err);
-        }
-      };
-
-      sourceNodeRef.current.connect(scriptProcessorRef.current);
-      scriptProcessorRef.current.connect(inputCtx.destination);
-    } catch (err) {
-      console.error('[Mic]', err);
-      toast.error('Microphone access denied. Please allow microphone access.');
-      setStatus('ready');
-    }
-  };
-
-  const stopMicrophone = () => {
-    try { scriptProcessorRef.current?.disconnect(); } catch (_) { }
-    try { sourceNodeRef.current?.disconnect(); } catch (_) { }
-    scriptProcessorRef.current = null;
-    sourceNodeRef.current = null;
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  };
-
-  // ── onmessage — same logic as AssessmentPage ──────────────────────────────
-  const handleMessage = (message) => {
-    const audioPart = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
-    if (audioPart?.data) playAudio(audioPart.data);
-
-    const outputTranscript = message.serverContent?.outputTranscription?.text;
-    if (outputTranscript) {
-      const cur = transcriptRef.current;
-      const last = cur[cur.length - 1];
-      if (last && last.speaker === 'ai' && !last.final) {
-        const sep = last.text.endsWith(' ') ? '' : ' ';
-        transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + outputTranscript }];
-      } else {
-        const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
-        transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
-      }
-    }
-
-    const inputTranscript = message.serverContent?.inputTranscription?.text;
-    if (inputTranscript) {
-      const cur = transcriptRef.current;
-      const last = cur[cur.length - 1];
-      if (last && last.speaker === 'user' && !last.final) {
-        const sep = last.text.endsWith(' ') ? '' : ' ';
-        transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + inputTranscript }];
-      } else {
-        const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
-        transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
-      }
-    }
-
-    if (message.serverContent?.turnComplete) {
-      voiceStateRef.current = 'listening';
-      setVoiceState('listening');
-      const cur = transcriptRef.current;
-      const last = cur[cur.length - 1];
-      if (last && !last.final) {
-        transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
-      }
-    }
-
-    if (message.serverContent?.interrupted) {
-      for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
-      sourcesRef.current.clear();
-      nextStartTimeRef.current = 0;
-      voiceStateRef.current = 'listening';
-      setVoiceState('listening');
-      const cur = transcriptRef.current;
-      const last = cur[cur.length - 1];
-      if (last && !last.final) {
-        transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
-      }
-    }
-  };
-
   // ── finalizeSession ────────────────────────────────────────────────────────
-  const finalizeSession = async (sid) => {
+  const finalizeSession = useCallback(async (sid) => {
     if (!sid) { setStatus('ready'); return; }
-    const clean = transcriptRef.current
-      .filter(t => t?.text?.trim())
-      .map(t => ({ ...t, final: true }));
+    const clean = getCleanTranscript();
     setTranscript(clean);
     setStatus('scoring');
-    voiceStateRef.current = 'idle';
-    setVoiceState('idle');
     try {
       await api.put(`/sessions/${sid}/complete`, { transcript: clean, metrics: {} });
     } catch (err) {
@@ -629,18 +451,16 @@ Rules:
       setStatus('completed');
       toast.warning('Session saved — scoring failed. Refresh to retry.');
     }
-  };
+  }, [getCleanTranscript]);
 
   // ── startSession — mirrors AssessmentPage's startAssessment ───────────────
   const startSession = async () => {
     setStatus('connecting');
     isEndingRef.current = false;
-    transcriptRef.current = [];
+    resetTranscript();
+    setTranscript([]);
 
     try {
-      await outputAudioContextRef.current.resume();
-      nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
-
       let sid = sessionId;
       if (!sid) {
         const res = await api.post('/sessions', {
@@ -658,49 +478,30 @@ Rules:
       }
       sessionIdRef.current = sid;
 
-      const tokenRes = await api.post('/sessions/live-token', {
-        session_id: sid,
-        system_prompt: buildSystemPrompt(),
-      });
-      const { token, model } = tokenRes.data;
-
-      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: 'v1alpha' } });
-
-      // Two-phase open — same pattern as AssessmentPage
-      let _onOpenCalled = false;
-      const _pendingOpen = () => {
-        setStatus('active');
-        voiceStateRef.current = 'listening';
-        setVoiceState('listening');
-        startMicrophone(geminiSessionRef.current);
-      };
-
-      const session = await ai.live.connect({
-        model: model,
-        config: { responseModalities: ['AUDIO'] },
-        callbacks: {
-          onopen: () => {
-            _onOpenCalled = true;
-            if (geminiSessionRef.current) _pendingOpen();
-          },
-          onmessage: handleMessage,
-          onerror: (e) => {
-            console.error('[Gemini] error:', e);
-            toast.error('Connection error — please try again.');
-            setStatus('ready');
-          },
-          onclose: () => {
-            stopMicrophone();
-            if (!isEndingRef.current) {
-              isEndingRef.current = true;
-              finalizeSession(sessionIdRef.current);
-            }
+      await connect({
+        sessionId: sid,
+        authToken: localStorage.getItem('fluentra_token'),
+        systemPrompt: buildSystemPrompt(),
+        config: {
+          systemInstruction: {
+            parts: [{ text: buildSystemPrompt() }],
           },
         },
+        onConnected: () => {
+          setStatus('active');
+        },
+        onError: (e) => {
+          console.error('[Gemini] error:', e);
+          toast.error('Connection error — please try again.');
+          setStatus('ready');
+        },
+        onClose: () => {
+          if (!isEndingRef.current) {
+            isEndingRef.current = true;
+            finalizeSession(sessionIdRef.current);
+          }
+        },
       });
-
-      geminiSessionRef.current = session;
-      if (_onOpenCalled) _pendingOpen();
 
     } catch (err) {
       console.error('[Session] start error:', err);
@@ -710,17 +511,12 @@ Rules:
   };
 
   // ── endSession ─────────────────────────────────────────────────────────────
-  const endSession = async () => {
+  const endSession = useCallback(async () => {
     if (isEndingRef.current) return;
     isEndingRef.current = true;
-    if (geminiSessionRef.current) {
-      try { geminiSessionRef.current.disconnect(); } catch (_) { }
-    }
-    stopMicrophone();
-    for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
-    sourcesRef.current.clear();
+    await disconnect();
     await finalizeSession(sessionIdRef.current);
-  };
+  }, [disconnect, finalizeSession]);
 
   // ── Session timer ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -730,15 +526,17 @@ Rules:
         setSecondsElapsed(prev => {
           const next = prev + 1;
           const limitSecs = (sessionData?.target_duration_minutes || sessionDuration) * 60;
-          if (next === Math.floor(limitSecs * 0.9) && geminiSessionRef.current) {
+          if (next === Math.max(0, limitSecs - 60)) {
             try {
-              geminiSessionRef.current.sendClientContent({
-                turns: [{ role: 'user', parts: [{ text: 'SYSTEM: Time is almost up. Please start wrapping up — summarize what was covered, give relevant homework, and say a warm goodbye.' }] }],
-                turnComplete: true,
-              });
+              sendText(
+                'SYSTEM: Time is almost up. Please start wrapping up — summarize what was covered, give relevant homework, and say a warm goodbye.',
+                { role: 'user', turnComplete: true }
+              );
             } catch (_) { }
           }
-          if (next >= Math.floor(limitSecs * 0.98)) endSession();
+          if (next >= limitSecs) {
+            endSession();
+          }
           return next;
         });
       }, 1000);
@@ -746,7 +544,7 @@ Rules:
       setSecondsElapsed(0);
     }
     return () => clearInterval(interval);
-  }, [status, sessionData, sessionDuration]);
+  }, [status, sessionData, sessionDuration, endSession, sendText]);
 
   const remainingSeconds = Math.max(0, (sessionData?.target_duration_minutes || sessionDuration) * 60 - secondsElapsed);
   const isTimeLow = remainingSeconds < 60;
@@ -846,7 +644,7 @@ Rules:
                 variant="outline"
                 size="icon"
                 className="rounded-full w-12 h-12"
-                onClick={() => { setMuted(m => !m); mutedRef.current = !mutedRef.current; }}
+                onClick={() => setMuted(m => !m)}
                 data-testid="session-mute"
               >
                 {muted ? <MicOff size={20} className="text-destructive" /> : <Mic size={20} />}
