@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
@@ -10,29 +10,7 @@ import { Mic, MicOff, PhoneOff, Sun, Moon, AlertCircle } from 'lucide-react';
 import VoiceVisualizer from '@/components/VoiceVisualizer';
 import api from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
-import { GoogleGenAI } from '@google/genai';
-
-// ─── Audio helpers ────────────────────────────────────────────────────────────
-
-function createAudioBufferFromRaw(ctx, arrayBuffer) {
-  const rawBytes = new Uint8Array(arrayBuffer);
-  const numFrames = rawBytes.length / 2;
-  const buffer = ctx.createBuffer(1, numFrames, 24000);
-  const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, numFrames);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-  buffer.copyToChannel(float32, 0);
-  return buffer;
-}
-
-function float32ToInt16(float32Array) {
-  const int16 = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32Array[i]));
-    int16[i] = s * 32768;
-  }
-  return int16;
-}
+import useGeminiLive from '@/hooks/useGeminiLive';
 
 // ─── Stage config ─────────────────────────────────────────────────────────────
 
@@ -72,287 +50,41 @@ Rules:
 export default function AssessmentPage() {
   const [sessionId, setSessionId] = useState(null);
   const [status, setStatus] = useState('intro');
-  const [voiceState, setVoiceState] = useState('idle');
-  const voiceStateRef = useRef('idle');
-  const [transcript, setTranscript] = useState([]);
   const [stageIndex, setStageIndex] = useState(0);
   const [scores, setScores] = useState(null);
-  const [muted, setMuted] = useState(false);
-  const mutedRef = useRef(false);
   const [error, setError] = useState(null);
   const [stageJustChanged, setStageJustChanged] = useState(false);
   const [scoringStep, setScoringStep] = useState('');
 
-  const geminiSessionRef = useRef(null);
-  const transcriptRef = useRef([]);
-  const streamRef = useRef(null);
-  const sourceNodeRef = useRef(null);
-  const scriptProcessorRef = useRef(null);
   const isEndingRef = useRef(false);
   const transcriptEndRef = useRef(null);
 
-  // Output audio — created once
-  const outputAudioContextRef = useRef(
-    new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
-  );
-  const outputGainRef = useRef(null);
-  const sourcesRef = useRef(new Set());
-  const nextStartTimeRef = useRef(0);
+  const {
+    voiceState,
+    transcript,
+    muted,
+    setMuted,
+    resetTranscript,
+    getCleanTranscript,
+    connect,
+    disconnect,
+    sendText,
+  } = useGeminiLive();
 
   const { user, updateUser } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const ctx = outputAudioContextRef.current;
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    outputGainRef.current = gain;
-    nextStartTimeRef.current = ctx.currentTime;
-  }, []);
-
-  useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [transcript]);
-
-  // Stage detection
-  useEffect(() => {
-    if (status !== 'active' || transcript.length === 0) return;
-
-    const fullAiText = transcript
-      .filter(t => t.speaker === 'ai')
-      .map(t => t.text.toLowerCase())
-      .join(' ');
-
-    let newStage = stageIndex;
-    if (fullAiText.includes("final part, let's do some storytelling") || fullAiText.includes("mysterious letter")) {
-      newStage = 3;
-    } else if (fullAiText.includes("next, i'd like your opinion") || fullAiText.includes("technology makes people less social")) {
-      newStage = 2;
-    } else if (fullAiText.includes("let's move on to description") || fullAiText.includes("favorite place")) {
-      newStage = 1;
-    }
-
-    if (newStage !== stageIndex) {
-      setStageIndex(newStage);
-      setStageJustChanged(true);
-      setTimeout(() => setStageJustChanged(false), 2000);
-    }
-
-    if (
-      (fullAiText.includes('assessment is now complete') || fullAiText.includes('assessment complete')) &&
-      !isEndingRef.current
-    ) {
-      setTimeout(() => endAssessment(), 2500);
-    }
-  }, [transcript, status, stageIndex]);
-
-  const playAudio = useCallback((data) => {
-    const ctx = outputAudioContextRef.current;
-    const gain = outputGainRef.current;
-    if (!ctx || !gain || ctx.state === 'closed') return;
-
-    const binaryStr = atob(data);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-
-    const audioBuffer = createAudioBufferFromRaw(ctx, bytes.buffer);
-    const src = ctx.createBufferSource();
-    src.buffer = audioBuffer;
-    src.connect(gain);
-
-    nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-    src.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += audioBuffer.duration;
-
-    sourcesRef.current.add(src);
-    src.addEventListener('ended', () => sourcesRef.current.delete(src));
-
-    if (voiceStateRef.current !== 'speaking') {
-      voiceStateRef.current = 'speaking';
-      setVoiceState('speaking');
-    }
-  }, []);
-
-  const startMicrophone = async (sessionInstance) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false,
-      });
-      streamRef.current = stream;
-
-      const inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      sourceNodeRef.current = inputCtx.createMediaStreamSource(stream);
-      scriptProcessorRef.current = inputCtx.createScriptProcessor(2048, 1, 1);
-
-      scriptProcessorRef.current.onaudioprocess = (e) => {
-        if (mutedRef.current || isEndingRef.current || !sessionInstance) return;
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = float32ToInt16(float32);
-        const bytes = new Uint8Array(int16.buffer);
-
-        let binary = '';
-        const chunkSize = 1024;
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
-        try {
-          sessionInstance.sendRealtimeInput({
-            media: { data: btoa(binary), mimeType: 'audio/pcm;rate=16000' }
-          });
-        } catch (err) {
-          console.warn('Realtime send failed:', err);
-        }
-      };
-
-      sourceNodeRef.current.connect(scriptProcessorRef.current);
-      scriptProcessorRef.current.connect(inputCtx.destination);
-    } catch (err) {
-      setError('Microphone access denied. Please allow microphone access.');
-      setStatus('intro');
-    }
-  };
-
-  const startAssessment = async () => {
-    setStatus('connecting');
-    setError(null);
-    try {
-      await outputAudioContextRef.current.resume();
-      nextStartTimeRef.current = outputAudioContextRef.current.currentTime;
-
-      let sid = sessionId;
-      if (!sid) {
-        const res = await api.post('/sessions', { session_type: 'assessment' });
-        sid = res.data.id;
-        setSessionId(sid);
-      }
-
-      const tokenRes = await api.post('/sessions/live-token', {
-        session_id: sid,
-        system_prompt: SYSTEM_PROMPT,
-      });
-      const { token, model } = tokenRes.data;
-
-      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: 'v1alpha' } });
-
-      let _onOpenCalled = false;
-      const _pendingOpen = () => {
-        setStatus('active');
-        voiceStateRef.current = 'listening';
-        setVoiceState('listening');
-        startMicrophone(geminiSessionRef.current);
-        geminiSessionRef.current.sendClientContent({
-          turns: [{ role: 'user', parts: [{ text: 'Hello! I am ready to start my assessment.' }] }],
-          turnComplete: true,
-        });
-      };
-
-      const session = await ai.live.connect({
-        model: model,
-        config: { responseModalities: ['AUDIO'] },
-        callbacks: {
-          onopen: () => {
-            _onOpenCalled = true;
-            if (geminiSessionRef.current) _pendingOpen();
-          },
-          onmessage: (message) => {
-            const audioPart = message.serverContent?.modelTurn?.parts?.[0]?.inlineData;
-            if (audioPart?.data) playAudio(audioPart.data);
-
-            const outputTranscript = message.serverContent?.outputTranscription?.text;
-            if (outputTranscript) {
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
-              if (last && last.speaker === 'ai' && !last.final) {
-                const sep = last.text.endsWith(' ') ? '' : ' ';
-                transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + outputTranscript }];
-              } else {
-                const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
-                transcriptRef.current = [...base, { speaker: 'ai', text: outputTranscript, final: false }];
-              }
-              setTranscript([...transcriptRef.current]);
-            }
-
-            const inputTranscript = message.serverContent?.inputTranscription?.text;
-            if (inputTranscript) {
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
-              if (last && last.speaker === 'user' && !last.final) {
-                const sep = last.text.endsWith(' ') ? '' : ' ';
-                transcriptRef.current = [...cur.slice(0, -1), { ...last, text: last.text + sep + inputTranscript }];
-              } else {
-                const base = (last && !last.final) ? [...cur.slice(0, -1), { ...last, final: true }] : cur;
-                transcriptRef.current = [...base, { speaker: 'user', text: inputTranscript, final: false }];
-              }
-              setTranscript([...transcriptRef.current]);
-            }
-
-            if (message.serverContent?.turnComplete) {
-              voiceStateRef.current = 'listening';
-              setVoiceState('listening');
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
-              if (last && !last.final) {
-                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
-                setTranscript([...transcriptRef.current]);
-              }
-            }
-
-            if (message.serverContent?.interrupted) {
-              for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-              voiceStateRef.current = 'listening';
-              setVoiceState('listening');
-              const cur = transcriptRef.current;
-              const last = cur[cur.length - 1];
-              if (last && !last.final) {
-                transcriptRef.current = [...cur.slice(0, -1), { ...last, final: true }];
-                setTranscript([...transcriptRef.current]);
-              }
-            }
-          },
-          onclose: () => {
-            if (status === 'active') { voiceStateRef.current = 'idle'; setVoiceState('idle'); }
-          },
-          onerror: (err) => {
-            console.error('Gemini error:', err);
-            setError('Connection error. Please try again.');
-            setStatus('intro');
-          }
-        }
-      });
-
-      geminiSessionRef.current = session;
-      if (_onOpenCalled) _pendingOpen();
-
-    } catch (err) {
-      setError(err?.response?.data?.detail || 'Failed to create session');
-      setStatus('intro');
-    }
-  };
-
-  const endAssessment = async () => {
+  const endAssessment = useCallback(async () => {
     if (isEndingRef.current) return;
     isEndingRef.current = true;
 
-    if (geminiSessionRef.current) { try { geminiSessionRef.current.disconnect(); } catch (_) { } }
-    try { scriptProcessorRef.current?.disconnect(); } catch (_) { }
-    try { sourceNodeRef.current?.disconnect(); } catch (_) { }
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    for (const source of sourcesRef.current.values()) { try { source.stop(); } catch (_) { } }
-    sourcesRef.current.clear();
+    await disconnect();
 
     setStatus('scoring');
-    voiceStateRef.current = 'idle';
-    setVoiceState('idle');
 
     try {
-      const cleanTranscript = transcriptRef.current
-        .filter(t => t.text && t.text.trim().length > 0)
-        .map(t => ({ ...t, final: true }));
+      const cleanTranscript = getCleanTranscript();
 
       setScoringStep('Storing session...');
       await api.put(`/sessions/${sessionId}/complete`, { transcript: cleanTranscript, metrics: {} });
@@ -396,6 +128,88 @@ export default function AssessmentPage() {
         strengths: ['Good effort'], areas_to_improve: ['Keep practicing'],
         detailed_feedback: 'Assessment recorded.',
       });
+    }
+  }, [disconnect, getCleanTranscript, sessionId, updateUser]);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [transcript]);
+
+  // Stage detection
+  useEffect(() => {
+    if (status !== 'active' || transcript.length === 0) return;
+
+    const fullAiText = transcript
+      .filter(t => t.speaker === 'ai')
+      .map(t => t.text.toLowerCase())
+      .join(' ');
+
+    let newStage = stageIndex;
+    if (fullAiText.includes("final part, let's do some storytelling") || fullAiText.includes("mysterious letter")) {
+      newStage = 3;
+    } else if (fullAiText.includes("next, i'd like your opinion") || fullAiText.includes("technology makes people less social")) {
+      newStage = 2;
+    } else if (fullAiText.includes("let's move on to description") || fullAiText.includes("favorite place")) {
+      newStage = 1;
+    }
+
+    if (newStage !== stageIndex) {
+      setStageIndex(newStage);
+      setStageJustChanged(true);
+      setTimeout(() => setStageJustChanged(false), 2000);
+    }
+
+    if (
+      (fullAiText.includes('assessment is now complete') || fullAiText.includes('assessment complete')) &&
+      !isEndingRef.current
+    ) {
+      setTimeout(() => endAssessment(), 2500);
+    }
+  }, [transcript, status, stageIndex, endAssessment]);
+
+  const startAssessment = async () => {
+    setStatus('connecting');
+    setError(null);
+    isEndingRef.current = false;
+    try {
+      resetTranscript();
+
+      let sid = sessionId;
+      if (!sid) {
+        const res = await api.post('/sessions', { session_type: 'assessment' });
+        sid = res.data.id;
+        setSessionId(sid);
+      }
+
+      await connect({
+        sessionId: sid,
+        authToken: localStorage.getItem('fluentra_token'),
+        systemPrompt: SYSTEM_PROMPT,
+        config: {
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }],
+          },
+        },
+        onConnected: () => {
+          setStatus('active');
+          sendText('Hello! I am ready to start my assessment.', { role: 'user', turnComplete: true });
+        },
+        onClose: () => {
+          if (!isEndingRef.current) {
+            setError('Connection closed. Please try again.');
+            setStatus('intro');
+          }
+        },
+        onError: (err) => {
+          console.error('Gemini error:', err);
+          setError('Connection error. Please try again.');
+          setStatus('intro');
+        },
+      });
+
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Failed to create session');
+      setStatus('intro');
     }
   };
 
@@ -612,7 +426,7 @@ export default function AssessmentPage() {
           <div className="flex items-center justify-center gap-4 p-4 border-t border-border/50">
             <Button
               variant="outline" size="icon" className="rounded-full w-12 h-12"
-              onClick={() => { setMuted(!muted); mutedRef.current = !muted; }}
+              onClick={() => setMuted(m => !m)}
               data-testid="mute-toggle"
             >
               {muted ? <MicOff size={20} className="text-destructive" /> : <Mic size={20} />}
