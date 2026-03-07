@@ -15,6 +15,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import jwt
 import bcrypt
+import boto3
+from botocore.config import Config as BotoConfig
 
 from google import genai
 from google.genai import types
@@ -28,6 +30,24 @@ db = client[os.environ['DB_NAME']]
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# ── S3 client for session recordings ──────────────────────────────────────────
+S3_BUCKET = os.environ.get('S3_BUCKET', 'fluentra-recordings')
+S3_REGION = os.environ.get('AWS_REGION', 'ap-south-1')
+
+s3_client = None
+try:
+    s3_client = boto3.client(
+        's3',
+        region_name=S3_REGION,
+        endpoint_url=f"https://s3.{S3_REGION}.amazonaws.com",
+        aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+        config=BotoConfig(signature_version='s3v4', s3={'addressing_style': 'virtual'}),
+    )
+    logger.info(f"S3 client initialized for bucket: {S3_BUCKET} in {S3_REGION}")
+except Exception as e:
+    logger.warning(f"S3 client initialization failed (recordings disabled): {e}")
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 gemini_client = None
@@ -431,6 +451,107 @@ async def complete_session(session_id: str, input: SessionComplete, background_t
     background_tasks.add_task(analyze_session, session_id, user["id"], transcript)
     return await db.sessions.find_one({"id": session_id}, {"_id": 0})
 
+# ==================== Session Recording Upload ====================
+
+class RecordingStatusInput(BaseModel):
+    status: str  # "uploaded" or "failed"
+    error: str = ""
+
+@api_router.get("/sessions/{session_id}/recording-upload-url")
+async def get_recording_upload_url(session_id: str, user=Depends(get_current_user)):
+    """Generate a presigned PUT URL for the frontend to upload the session recording directly to S3."""
+    if not s3_client:
+        raise HTTPException(status_code=503, detail="Recording service not configured")
+
+    s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    s3_key = f"recordings/{user['id']}/{session_id}.webm"
+
+    try:
+        upload_url = s3_client.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': S3_BUCKET,
+                'Key': s3_key,
+                'ContentType': 'audio/webm',
+            },
+            ExpiresIn=600,  # 10 minutes to upload
+        )
+
+        # Set recording status to "uploading"
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"recording_status": "uploading", "recording_s3_key": s3_key}}
+        )
+
+        logger.info(f"Generated presigned upload URL for session {session_id}")
+        return {"upload_url": upload_url, "s3_key": s3_key}
+
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}")
+
+
+@api_router.put("/sessions/{session_id}/recording-status")
+async def update_recording_status(session_id: str, input: RecordingStatusInput, user=Depends(get_current_user)):
+    """Called by the frontend after upload completes (or fails) to finalize the recording URL."""
+    s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if input.status == "uploaded":
+        s3_key = s.get("recording_s3_key", "")
+        if s3_key and s3_client:
+            # Generate the public S3 URL (or use presigned GET for private buckets)
+            recording_url = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{s3_key}"
+            await db.sessions.update_one(
+                {"id": session_id},
+                {"$set": {"recording_status": "uploaded", "recording_url": recording_url}}
+            )
+            logger.info(f"Recording uploaded for session {session_id}: {recording_url}")
+            return {"recording_status": "uploaded", "recording_url": recording_url}
+        else:
+            raise HTTPException(status_code=400, detail="No S3 key found for this session")
+    elif input.status == "failed":
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"recording_status": "failed", "recording_error": input.error}}
+        )
+        logger.warning(f"Recording upload failed for session {session_id}: {input.error}")
+        return {"recording_status": "failed"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid status — use 'uploaded' or 'failed'")
+
+
+@api_router.get("/sessions/{session_id}/recording-url")
+async def get_recording_playback_url(session_id: str, user=Depends(get_current_user)):
+    """Generate a presigned GET URL for playing back the recording."""
+    if not s3_client:
+        raise HTTPException(status_code=503, detail="Recording service not configured")
+
+    s = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if s.get("recording_status") != "uploaded":
+        raise HTTPException(status_code=404, detail="No recording available")
+
+    s3_key = s.get("recording_s3_key", "")
+    if not s3_key:
+        raise HTTPException(status_code=404, detail="No recording found")
+
+    try:
+        playback_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': s3_key},
+            ExpiresIn=3600,  # 1 hour
+        )
+        return {"playback_url": playback_url, "recording_status": s.get("recording_status")}
+    except Exception as e:
+        logger.error(f"Failed to generate playback URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate playback URL")
+
 # ==================== Assessment Scoring ====================
 class ScoreAssessmentInput(BaseModel):
     transcript: list = []
@@ -454,7 +575,7 @@ async def score_assessment(session_id: str, input: ScoreAssessmentInput = ScoreA
 Transcript:
 {transcript_text if transcript_text.strip() else "No transcript available - provide default B1 assessment."}
 
-Evaluate: Fluency(30%), Grammar(30%), Vocabulary(25%), Confidence(15%).
+Evaluate: Fluency(30%), Grammar(30%), Vocabulary(25%), Confidence(15%). Provide a realistic score out of 100 based strictly on the transcript provided. Do not use default or static scores like 50. If the transcript is very short, scoring should legitimately reflect that lack of context.
 CEFR: A1(0-16), A2(17-33), B1(34-50), B2(51-67), C1(68-84), C2(85-100).
 
 Respond ONLY with valid JSON:
@@ -723,77 +844,155 @@ async def add_memory(input: MemoryCreateInput, user=Depends(get_current_user)):
 
 # ==================== Gemini Live Token (ephemeral, direct client connection) ====================
 
+"""
+Drop-in replacement for the /sessions/live-token endpoint in server.py.
+
+Replace the block between:
+  # ==================== Gemini Live Token ====================
+and the next section comment with this entire file content.
+"""
+
+# ==================== Gemini Live Token ====================
+
 class LiveTokenRequest(BaseModel):
     session_id: str
-    system_prompt: str
+    system_prompt: str = ""
+
 
 @api_router.post("/sessions/live-token")
 async def get_live_token(input: LiveTokenRequest, user=Depends(get_current_user)):
     """
-    Mints a short-lived ephemeral token with the system prompt baked in server-side.
-    The frontend uses this token to connect DIRECTLY to Gemini — no audio relay,
-    zero latency overhead from the Python proxy.
+    Mint a short-lived ephemeral token with the full Live session config
+    baked in server-side. The frontend connects DIRECTLY to Gemini Live
+    using this token — the real API key never leaves the server.
     """
-    s_doc = await db.sessions.find_one({"id": input.session_id, "user_id": user["id"]})
+    s_doc = await db.sessions.find_one(
+        {"id": input.session_id, "user_id": user["id"]}
+    )
     if not s_doc:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Ensure we have this user's tutor persona + base system prompt
+    # ── Build system prompt ────────────────────────────────────────────────────
     user = await ensure_tutor_persona(user["id"])
     tutor_system_prompt = user.get("tutor_system_prompt", "")
-
-    # Prefer system_prompt baked into the session doc (from plan template).
-    # Fall back to whatever the frontend sent.
     base_prompt = s_doc.get("system_prompt") or input.system_prompt or ""
 
-    # If the base prompt already includes the tutor system prompt, don't duplicate it.
     if tutor_system_prompt and tutor_system_prompt.strip() in base_prompt:
         system_prompt = base_prompt
     else:
         system_prompt = (tutor_system_prompt + "\n\n" + base_prompt).strip()
+
+    # Append previous session recap
     try:
         last_session = await db.sessions.find_one(
-            {"user_id": user["id"], "status": "completed", "analysis.summary": {"$exists": True},
-             "id": {"$ne": input.session_id}},
-            {"_id": 0}, sort=[("started_at", -1)]
+            {
+                "user_id": user["id"],
+                "status": "completed",
+                "analysis.summary": {"$exists": True},
+                "id": {"$ne": input.session_id},
+            },
+            {"_id": 0},
+            sort=[("started_at", -1)],
         )
         if last_session and last_session.get("analysis", {}).get("summary"):
             system_prompt += f"\n\nPrevious session recap:\n{last_session['analysis']['summary']}"
     except Exception as e:
         logger.warning(f"Could not fetch previous session summary: {e}")
 
+    system_prompt += "\n\nCRITICAL INSTRUCTION: The user will speak in English. You MUST transcribe and understand their speech strictly in English. Do NOT transcribe into Hindi or any other language, even if they have an accent or use loan words. Your generated transcripts and responses must always be in English."
+
+    # ── Mint the token ─────────────────────────────────────────────────────────
+    now = datetime.now(timezone.utc)
+
     try:
-        now = datetime.now(timezone.utc)
         token = get_gemini_live_client().auth_tokens.create(
             config={
                 "uses": 1,
+                # Session stays valid for 30 min once started
                 "expire_time": (now + timedelta(minutes=30)).isoformat(),
+                # Client must open the session within 2 min of receiving the token
                 "new_session_expire_time": (now + timedelta(minutes=2)).isoformat(),
+
                 "live_connect_constraints": {
                     "model": LIVE_MODEL,
                     "config": {
+                        # ── Output ──────────────────────────────────────────
                         "response_modalities": ["AUDIO"],
+
+                        # ── System prompt (persona + session plan) ──────────
                         "system_instruction": system_prompt,
-                        "proactivity":{'proactive_audio': True},
+
+                        # ── Voice ────────────────────────────────────────────
+                        "speech_config": {
+                            "voice_config": {
+                                "prebuilt_voice_config": {"voice_name": "Aoede"}
+                            }
+                        },
+
+                        # ── Transcription (free, side-channel) ───────────────
                         "input_audio_transcription": {},
                         "output_audio_transcription": {},
+
+                        # ── Latency: disable thinking for conversation ────────
+                        # thinking_budget=0 removes the reasoning pass entirely,
+                        # cutting time-to-first-audio-chunk significantly.
                         "thinking_config": {"thinking_budget": 0},
-                        "context_window_compression": {
-                            "sliding_window": {}
-                        },
+
+                        # ── VAD — most impactful latency knob ────────────────
+                        # The defaults are too aggressive: they end turns too
+                        # quickly (model talks before you finish) AND they are
+                        # too sensitive to silence gaps (choppy back-and-forth).
+                        #
+                        # Tuning guide:
+                        #   start_of_speech_sensitivity HIGH  → model starts
+                        #     processing as soon as you open your mouth (fast).
+                        #   end_of_speech_sensitivity   LOW   → model waits a
+                        #     beat before deciding you're done (natural pauses).
+                        #   silence_duration_ms         600   → 600 ms of silence
+                        #     confirms end of turn. Shorter = faster but cuts off
+                        #     mid-thought; longer = more natural but slightly
+                        #     higher perceived latency after you stop talking.
+                        #   prefix_padding_ms           100   → ignore very short
+                        #     noise bursts (< 100 ms) at start of turn.
                         "realtime_input_config": {
+                            "automatic_activity_detection": {
+                                "disabled": False,
+                                "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                                "end_of_speech_sensitivity":   "END_SENSITIVITY_LOW",
+                                "silence_duration_ms":         600,
+                                "prefix_padding_ms":           100,
+                            },
+                            # Only send audio the user actually spoke —
+                            # not silence between turns.
+                            "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+                        },
+
+                        # ── Proactivity ──────────────────────────────────────
+                        # Lets the model stay silent when it decides the user's
+                        # speech was ambient / not directed at it.
+                        "proactivity": {"proactive_audio": True},
+
+                        # ── Context window compression ───────────────────────
+                        # Native audio burns ~25 tokens/sec. Without compression
+                        # a 10-min session uses ~15k tokens of context and the
+                        # model slows down noticeably.
+                        "context_window_compression": {
+                            "sliding_window": {},
+                            "trigger_tokens": 10000,
+                        },
                     },
-                    }
                 },
+
                 "http_options": {"api_version": "v1alpha"},
             }
         )
+
         logger.info(f"Minted ephemeral token for session {input.session_id}")
         return {"token": token.name, "model": LIVE_MODEL}
+
     except Exception as e:
         logger.error(f"Failed to mint ephemeral token: {e}")
         raise HTTPException(status_code=500, detail=f"Could not create live token: {str(e)}")
-
 
 # ==================== Gemini Live WebSocket (DEPRECATED — kept as fallback) ====================
 @app.websocket("/api/ws/session")
@@ -824,9 +1023,12 @@ async def generate_session_report(session_id: str, transcripts: list):
 TRANSCRIPT:
 {transcript_text}
 
+SCORING CRITERIA (Strictly evaluate out of 100 based on the transcript, DO NOT output default numbers like 85):
+- Provide a realistic score based on the actual transcript. If the user spoke very little or made many errors, give a lower score (e.g., 20-40). If they did well, give a higher score.
+
 Respond with strictly valid JSON matching this schema:
 {{
-  "score": 85,
+  "score": 0,
   "executive_summary": "Overall good session...",
   "strengths": ["Clear pronunciation"],
   "weaknesses": ["Grammar errors in past tense"],
@@ -1039,6 +1241,7 @@ async def websocket_voice_agent(
 class ScoreSessionInput(BaseModel):
     session_id: str
     transcript: list = []
+    force_rescore: bool = False
 
 @api_router.post("/ai/score-session")
 async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_user)):
@@ -1050,8 +1253,8 @@ async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_us
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Idempotency — if already scored, return cached result immediately
-    if s.get("metrics", {}).get("overall_score", 0) > 0:
+    # Idempotency — if already scored, return cached result (unless force_rescore)
+    if not input.force_rescore and s.get("metrics", {}).get("overall_score", 0) > 0:
         logger.info(f"Session {session_id} already scored, returning cached result")
         return {"metrics": s.get("metrics", {}), "analysis": s.get("analysis", {})}
 
@@ -1063,11 +1266,15 @@ async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_us
     def clean_text(t):
         return re.sub(r"  +", " ", t.get("text", "")).strip()
 
+    user_turns = [clean_text(t) for t in transcript if t.get("speaker") == "user" and clean_text(t) and clean_text(t) not in ("<noise>", ".")]
+    user_word_count = sum(len(t.split()) for t in user_turns)
+    user_turn_count = len(user_turns)
+
     transcript_text = "\n".join([
         f"{t.get('speaker','?').upper()}: {clean_text(t)}"
         for t in transcript if clean_text(t)
     ])
-    logger.info(f"Scoring session {session_id}, transcript length: {len(transcript_text)} chars")
+    logger.info(f"Scoring session {session_id}, transcript length: {len(transcript_text)} chars, user words: {user_word_count}, user turns: {user_turn_count}")
 
     async def call_with_retry(fn, retries=3, base_delay=15):
         for attempt in range(retries):
@@ -1081,41 +1288,67 @@ async def score_session_ai(input: ScoreSessionInput, user=Depends(get_current_us
                 else:
                     raise
 
-    prompt = f"""You are an expert English language coach. Deeply analyze this {session_type} session for a {cefr}-level student and return a comprehensive evaluation.
+    prompt = f"""You are an expert English language evaluator. Deeply analyze this {session_type} session for a {cefr}-level student and return a comprehensive, HONEST evaluation.
 
 TRANSCRIPT:
-{transcript_text if transcript_text.strip() else "Very short session — provide conservative but encouraging scores."}
+{transcript_text if transcript_text.strip() else "Very short session — provide very low scores (10-25)."}
+
+TRANSCRIPT STATISTICS:
+- The student spoke {user_word_count} words across {user_turn_count} turns.
+- For reference: a good 8-minute session should have 150-400 student words.
+
+## CRITICAL SCORING RULES — READ CAREFULLY:
+1. You MUST score based ONLY on what the student actually said in the transcript above.
+2. DO NOT give default/safe scores. Each metric must be independently calculated.
+3. Every score across the different metrics MUST be different — grammar, vocabulary, fluency, confidence should NOT all be the same number.
+4. Reference these calibration examples:
+   - Student who only says "Yes", "No", "Okay", single words, or non-English → overall 15-30
+   - Student who speaks in fragments ("I go school", "breakfast toast") → overall 25-40
+   - Student who forms basic sentences with frequent errors → overall 35-50
+   - Student who speaks in mostly correct simple sentences → overall 50-65
+   - Student who speaks fluently with minor errors → overall 65-80
+   - Student who speaks very fluently with rare errors → overall 80-95
+5. The student in this transcript spoke only {user_word_count} words. Score accordingly — fewer words = lower fluency and confidence scores.
+6. If the student used non-English words (Hindi, Telugu, Arabic, etc.), this should LOWER their scores significantly.
+7. The "strengths" and "areas_for_improvement" arrays are MANDATORY — you MUST include at least 2 items in each.
+
+SCORING CRITERIA (each independently 0-100):
+- Grammar Accuracy: Correct tenses, articles, prepositions, sentence structure. Missing subjects/verbs = low score.
+- Fluency WPM: Approximate words per minute the student spoke in English. Raw count: {user_word_count} words in ~{s.get('duration_minutes', 8)} minutes.
+- Vocabulary: Variety and appropriateness of words used. Single-word answers = very low.
+- Confidence: Willingness to speak, length of responses, self-correction attempts.
+- Overall Score: Weighted average reflecting true ability. Must NOT be the same as any individual metric.
 
 Return ONLY valid JSON with this exact structure:
 {{
-  "overall_score": 72,
-  "grammar_accuracy": 68,
-  "fluency_wpm": 95,
-  "confidence_score": 70,
-  "vocabulary_score": 65,
-  "pronunciation_score": 72,
-  "filler_word_count": 4,
-  "topic_relevance_score": 80,
+  "overall_score": 0,
+  "grammar_accuracy": 0,
+  "fluency_wpm": 0,
+  "confidence_score": 0,
+  "vocabulary_score": 0,
+  "pronunciation_score": 0,
+  "filler_word_count": 0,
+  "topic_relevance_score": 0,
 
   "skill_breakdown": {{
-    "grammar": 68,
-    "vocabulary": 65,
-    "fluency": 72,
-    "confidence": 70,
-    "listening": 75,
-    "coherence": 68
+    "grammar": 0,
+    "vocabulary": 0,
+    "fluency": 0,
+    "confidence": 0,
+    "listening": 0,
+    "coherence": 0
   }},
 
   "summary": "2-3 sentence recap of what was discussed and the student's overall performance.",
 
   "strengths": [
-    "Specific strength 1 with example from transcript",
-    "Specific strength 2 with example from transcript"
+    "Specific strength 1: describe with example from transcript",
+    "Specific strength 2: describe with example from transcript"
   ],
 
   "areas_for_improvement": [
-    "Specific area 1 with concrete advice",
-    "Specific area 2 with concrete advice"
+    "Specific area 1: concrete advice on what to practice",
+    "Specific area 2: concrete advice on what to practice"
   ],
 
   "homework": [
@@ -1184,10 +1417,30 @@ Return ONLY valid JSON with this exact structure:
         "skill_breakdown": scores.get("skill_breakdown", {}),
     }
 
+    # Ensure strengths and areas_for_improvement are always populated
+    strengths = scores.get("strengths", [])
+    areas_for_improvement = scores.get("areas_for_improvement", [])
+
+    # Fallback: if Gemini didn't return strengths, generate from context
+    if not strengths:
+        if user_word_count > 0:
+            strengths.append("Willingness to communicate: Made an effort to participate in the conversation despite limited vocabulary.")
+        if user_turn_count >= 3:
+            strengths.append("Engagement: Stayed engaged throughout the session and responded to questions.")
+        if not strengths:
+            strengths.append("Showed up and practiced, which is the most important step in language learning.")
+
+    if not areas_for_improvement:
+        if user_word_count < 50:
+            areas_for_improvement.append("Speaking volume: Try to speak in longer sentences instead of single words or short phrases.")
+        areas_for_improvement.append("Sentence structure: Practice forming complete sentences with subject + verb + object pattern.")
+        if not areas_for_improvement:
+            areas_for_improvement.append("Continue practicing to build fluency and confidence.")
+
     analysis = {
         "summary": scores.get("summary", ""),
-        "strengths": scores.get("strengths", []),
-        "areas_for_improvement": scores.get("areas_for_improvement", []),
+        "strengths": strengths,
+        "areas_for_improvement": areas_for_improvement,
         "homework": scores.get("homework", []),
         "new_words": scores.get("new_words", []),
         "mistakes": [],  # structured mistakes stored in db.mistakes separately
@@ -1198,9 +1451,11 @@ Return ONLY valid JSON with this exact structure:
         "other_details": scores.get("other_details", ""),
     }
 
+    logger.info(f"Session {session_id} scored: overall={metrics['overall_score']}, grammar={metrics['grammar_accuracy']}, vocab={metrics['vocabulary_score']}, strengths={len(strengths)}, areas={len(areas_for_improvement)}")
+
     await db.sessions.update_one(
         {"id": session_id},
-        {"$set": {"metrics": metrics, "analysis": analysis, "feedback": scores.get("strengths", [])}}
+        {"$set": {"metrics": metrics, "analysis": analysis, "feedback": strengths}}
     )
 
     for m in scores.get("mistakes", []):

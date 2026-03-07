@@ -44,13 +44,27 @@ function RadarBar({ label, value, color = 'hsl(var(--accent))' }) {
   );
 }
 
-function CompletedView({ sessionData, transcript, navigate }) {
+function CompletedView({ sessionData, transcript, navigate, onRescore, recordingStatus }) {
   const [activeTab, setActiveTab] = React.useState('summary');
+  const [rescoring, setRescoring] = React.useState(false);
+  const [playbackUrl, setPlaybackUrl] = React.useState(null);
   const metrics = sessionData?.metrics || {};
   const analysis = sessionData?.analysis || {};
   const score = metrics.overall_score || 0;
   const mistakes = sessionData?.extracted_mistakes?.length ? sessionData.extracted_mistakes : [];
   const scoreColor = score >= 70 ? '#4ade80' : score >= 40 ? '#facc15' : '#f87171';
+  const recStatus = recordingStatus || sessionData?.recording_status;
+
+  // Auto-fetch the audio playback URL if the session is uploaded
+  React.useEffect(() => {
+    if (recStatus === 'uploaded' && !playbackUrl && sessionData?.id) {
+      import('@/utils/api').then(({ default: api }) => {
+        api.get(`/sessions/${sessionData.id}/recording-url`)
+          .then(res => setPlaybackUrl(res.data.playback_url))
+          .catch(() => console.error('[Playback] Failed to load recording URL'));
+      });
+    }
+  }, [recStatus, playbackUrl, sessionData?.id]);
 
   const skillBreakdown = metrics.skill_breakdown || {
     grammar: metrics.grammar_accuracy || 0,
@@ -74,7 +88,7 @@ function CompletedView({ sessionData, transcript, navigate }) {
   const hwTypeIcon = { writing: '✍️', speaking: '🗣️', reading: '📖', grammar: '📝', vocabulary: '📚' };
 
   return (
-    <div className="flex-1 overflow-y-auto bg-background">
+    <div className="flex-1 overflow-y-auto bg-background pb-[100px]">
       <div className="relative border-b border-border/20 bg-card/20">
         <div className="max-w-5xl mx-auto px-6 py-10 flex flex-col md:flex-row items-center md:items-start gap-8">
           <div className="flex-shrink-0">
@@ -111,6 +125,17 @@ function CompletedView({ sessionData, transcript, navigate }) {
             <button onClick={() => window.location.reload()}
               className="w-full px-5 py-2.5 rounded-full text-sm font-medium border border-border/40 text-muted-foreground hover:border-border hover:text-foreground transition-colors bg-card/40"
               data-testid="session-reload-btn">Refresh</button>
+            {onRescore && (
+              <button
+                onClick={async () => {
+                  setRescoring(true);
+                  try { await onRescore(); } finally { setRescoring(false); }
+                }}
+                disabled={rescoring}
+                className="w-full px-5 py-2.5 rounded-full text-sm font-medium border border-amber-500/40 text-amber-400 hover:border-amber-500 hover:text-amber-300 transition-colors bg-card/40 disabled:opacity-50"
+                data-testid="session-rescore-btn"
+              >{rescoring ? 'Re-scoring…' : 'Re-score'}</button>
+            )}
           </div>
         </div>
       </div>
@@ -355,6 +380,50 @@ function CompletedView({ sessionData, transcript, navigate }) {
         )}
 
       </div>
+
+      {/* Sticky Bottom Audio Player */}
+      {recStatus && recStatus !== 'failed' && (
+        <div className="fixed bottom-0 left-0 right-0 w-full z-50 bg-card/95 border-t border-border/30 p-4 sm:p-5 shadow-[0_-20px_40px_-15px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+          <div className="max-w-5xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4 px-2">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-full bg-accent/20 flex items-center justify-center text-accent shrink-0">
+                {recStatus === 'uploading' ? (
+                  <span className="animate-spin text-xl">⏳</span>
+                ) : (
+                  <span className="text-2xl">🎙️</span>
+                )}
+              </div>
+              <div>
+                <h4 className="text-[14px] font-bold text-foreground">Session Recording</h4>
+                <p className="text-xs text-muted-foreground font-medium uppercase tracking-widest mt-0.5">
+                  {recStatus === 'uploading' ? 'Processing and saving...' : 'Ready to listen'}
+                </p>
+              </div>
+            </div>
+
+            {recStatus === 'uploading' && (
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/20 md:ml-auto">
+                <span className="flex h-2.5 w-2.5 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                </span>
+                <span className="text-xs text-amber-500 font-semibold uppercase tracking-wider">Uploading</span>
+              </div>
+            )}
+
+            {playbackUrl && (
+              <div className="w-full md:w-auto md:ml-auto md:min-w-[400px]">
+                <audio
+                  controls
+                  src={playbackUrl}
+                  className="w-full h-11 [&::-webkit-media-controls-panel]:bg-background/80 [&::-webkit-media-controls-panel]:border [&::-webkit-media-controls-panel]:border-border/50"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -392,10 +461,14 @@ export default function SessionPage() {
     setMuted,
     resetTranscript,
     getCleanTranscript,
+    getRecordingBlob,
     connect,
     disconnect,
     sendText,
   } = useGeminiLive();
+
+  // ── Recording upload state ─────────────────────────────────────────────────
+  const [recordingStatus, setRecordingStatus] = useState(null); // null | 'uploading' | 'uploaded' | 'failed'
 
   // ── Load session ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -428,12 +501,55 @@ Rules:
 - Keep responses concise — this is about THEIR speaking practice.`;
   };
 
+  // ── uploadRecording — non-blocking S3 upload ───────────────────────────────
+  const uploadRecording = useCallback(async (sid) => {
+    // Wait a tick for MediaRecorder.onstop to fire and create the blob
+    await new Promise(r => setTimeout(r, 500));
+    const blob = getRecordingBlob();
+    if (!blob || blob.size === 0) {
+      console.log('[Recording] No recording blob available, skipping upload');
+      return;
+    }
+    console.log(`[Recording] Uploading ${(blob.size / 1024 / 1024).toFixed(2)} MB recording`);
+    setRecordingStatus('uploading');
+    try {
+      // 1. Get presigned upload URL
+      const { data } = await api.get(`/sessions/${sid}/recording-upload-url`);
+      const { upload_url } = data;
+
+      // 2. Upload directly to S3
+      await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'audio/webm' },
+        body: blob,
+      });
+
+      // 3. Notify backend upload is complete
+      await api.put(`/sessions/${sid}/recording-status`, { status: 'uploaded' });
+      setRecordingStatus('uploaded');
+      console.log('[Recording] Upload complete');
+    } catch (err) {
+      console.error('[Recording] Upload failed:', err);
+      setRecordingStatus('failed');
+      try {
+        await api.put(`/sessions/${sid}/recording-status`, {
+          status: 'failed',
+          error: err?.message || 'Upload failed',
+        });
+      } catch (_) { }
+    }
+  }, [getRecordingBlob]);
+
   // ── finalizeSession ────────────────────────────────────────────────────────
   const finalizeSession = useCallback(async (sid) => {
     if (!sid) { setStatus('ready'); return; }
     const clean = getCleanTranscript();
     setTranscript(clean);
     setStatus('scoring');
+
+    // Fire recording upload in the background (non-blocking)
+    uploadRecording(sid).catch(err => console.error('[Recording] background upload error:', err));
+
     try {
       await api.put(`/sessions/${sid}/complete`, { transcript: clean, metrics: {} });
     } catch (err) {
@@ -451,7 +567,7 @@ Rules:
       setStatus('completed');
       toast.warning('Session saved — scoring failed. Refresh to retry.');
     }
-  }, [getCleanTranscript]);
+  }, [getCleanTranscript, uploadRecording]);
 
   // ── startSession — mirrors AssessmentPage's startAssessment ───────────────
   const startSession = async () => {
@@ -666,6 +782,22 @@ Rules:
           sessionData={sessionData}
           transcript={sessionData?.transcript || transcript}
           navigate={navigate}
+          recordingStatus={recordingStatus}
+          onRescore={async () => {
+            try {
+              await api.post('/ai/score-session', {
+                session_id: sessionId || paramId,
+                transcript: sessionData?.transcript || transcript,
+                force_rescore: true,
+              });
+              const res = await api.get(`/sessions/${sessionId || paramId}`);
+              setSessionData(res.data);
+              toast.success('Session re-scored!');
+            } catch (err) {
+              console.error('[Rescore] error:', err);
+              toast.error('Re-scoring failed. Please try again.');
+            }
+          }}
         />
       )}
 
